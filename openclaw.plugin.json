@@ -1,0 +1,51 @@
+{
+  "id": "nc-local-im-connector",
+  "name": "Local IM Connector",
+  "description": "Local IM Channel Plugin for OpenClaw - 提供 HTTP 和 WebSocket 接口",
+  "version": "2.0.0",
+  "type": "channel",
+  "author": "OpenClaw",
+  "channels": ["nc-local-im-connector"],
+  "homepage": "https://docs.openclaw.ai",
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "enabled": {
+        "type": "boolean",
+        "default": true,
+        "description": "启用或禁用本地 IM 连接器"
+      },
+      "connectionMode": {
+        "type": "string",
+        "enum": ["server", "client"],
+        "default": "server",
+        "description": "运行模式 (Server: 本地监听 / Client: 主动连接外部服务)"
+      },
+      "clientWsUrl": {
+        "type": "string",
+        "default": "ws://127.0.0.1:8080",
+        "description": "Client 模式下要连接的 WebSocket 地址"
+      },
+      "wsPort": {
+        "type": "number",
+        "default": 3001,
+        "description": "Server 模式下 WebSocket 服务端口"
+      },
+      "httpPort": {
+        "type": "number",
+        "default": 3002,
+        "description": "Server 模式下 HTTP 服务端口"
+      },
+      "gatewayToken": {
+        "type": "string",
+        "description": "Gateway 认证令牌"
+      },
+      "tokenType": {
+        "type": "string",
+        "enum": ["Bearer", "ApiKey"],
+        "default": "Bearer",
+        "description": "令牌类型"
+      }
+    }
+  }
+}

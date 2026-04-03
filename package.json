@@ -1,0 +1,46 @@
+{
+  "name": "@openclaw/nc-local-im-connector",
+  "version": "2.0.0",
+  "type": "module",
+  "description": "Local IM Channel Plugin for OpenClaw - 基于 OpenClaw 最新 SDK 重构",
+  "main": "index.js",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "test": "vitest"
+  },
+  "openclaw": {
+    "id": "nc-local-im-connector",
+    "name": "Local IM Connector",
+    "description": "Provide local WebSocket/HTTP endpoints and Outbound Stream connection to chat with OpenClaw agents.",
+    "extensions": ["./index.ts"],
+    "setupEntry": "./setup-entry.ts",
+    "channel": {
+      "id": "nc-local-im-connector",
+      "label": "Local IM",
+      "blurb": "提供本地 HTTP 和 WebSocket 接口，并支持作为长连接客户端(类似钉钉模式)接入大模型。"
+    },
+    "compat": {
+      "pluginApi": ">=2026.3.24-beta.2",
+      "minGatewayVersion": "2026.3.24-beta.2"
+    },
+    "build": {
+      "openclawVersion": "2026.3.24-beta.2",
+      "pluginSdkVersion": "2026.3.24-beta.2"
+    }
+  },
+  "dependencies": {
+    "axios": "^1.6.0",
+    "express": "^4.18.2",
+    "ws": "^8.16.0",
+    "@sinclair/typebox": "^0.32.15",
+    "openclaw": "2026.3.24-beta.2"
+  },
+  "devDependencies": {
+    "typescript": "^5.3.3",
+    "@types/node": "^20.11.0",
+    "@types/express": "^4.17.21",
+    "@types/ws": "^8.5.10",
+    "vitest": "^1.0.0"
+  }
+}
