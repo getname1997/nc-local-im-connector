@@ -1,6 +1,6 @@
 {
   "name": "nc-local-im-connector",
-  "version": "2.1.0-beta.1",
+  "version": "2.1.0",
   "type": "module",
   "description": "Local IM Channel Plugin for OpenClaw - 基于 OpenClaw 最新 SDK 重构",
   "main": "index.js",
