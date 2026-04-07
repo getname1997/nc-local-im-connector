@@ -12,7 +12,7 @@ export default defineChannelPluginEntry({
     name: 'Local IM Connector',
     description: 'Provide local WebSocket/HTTP endpoints and Outbound Stream connection to chat with OpenClaw agents. Supports both Server (listening) and Client (long-connection) modes.',
     plugin: ncLocalImPlugin,
-    start: ncLocalImPlugin.start,
+    // start: ncLocalImPlugin.start,
     registerCliMetadata(api) {
         api.registerCli(
             ({ program }) => {
@@ -73,43 +73,43 @@ export default defineChannelPluginEntry({
         }
 
         // 强制检查配置并尝试启动 (如果 OpenClaw 没调用 start)
-        setTimeout(async () => {
-            const cfg = (api as any).config || {};
-
-            // 尝试从 global config 中获取账号
-            const section = cfg.channels?.['nc-local-im-connector'] || {};
-            const isEnabled = section.enabled !== false;
-            api.logger?.info(`[LocalIM] Fallback 检查: enabled=${section.enabled}, isEnabled=${isEnabled}`);
-
-            if (isEnabled) {
-                api.logger?.info('[LocalIM] 正在尝试 Fallback 启动流程...');
-
-                try {
-                    // 1. 获取所有账号 ID
-                    const accountId = await ncLocalImPlugin.config.listAccountIds(cfg);
-                    api.logger?.info(`[LocalIM] 发现账号列表: ${JSON.stringify(accountId)}`);
-
-                    api.logger?.info(`[LocalIM] 准备启动账号: ${accountId}`);
-                    const account = await ncLocalImPlugin.config.resolveAccount(cfg, accountId);
-                    const startCtx = {
-                        account,
-                        cfg,
-                        log: api.logger,
-                        runtime: (api as any).runtime || {}
-                    };
-
-                    if (ncLocalImPlugin.gateway && ncLocalImPlugin.gateway.startAccount) {
-                        api.logger?.info(`[LocalIM] 通过 gateway.startAccount 启动: ${accountId}`);
-                        await ncLocalImPlugin.gateway.startAccount(startCtx);
-                    } else {
-                        api.logger?.info(`[LocalIM] 通过直接 start 启动: ${accountId}`);
-                        await ncLocalImPlugin.start(startCtx);
-                    }
-
-                } catch (e: any) {
-                    api.logger?.error(`[LocalIM] Fallback 启动过程异常: ${e.message}\n${e.stack}`);
-                }
-            }
-        }, 15000);
+        // setTimeout(async () => {
+        //     const cfg = (api as any).config || {};
+        //
+        //     // 尝试从 global config 中获取账号
+        //     const section = cfg.channels?.['nc-local-im-connector'] || {};
+        //     const isEnabled = section.enabled !== false;
+        //     api.logger?.info(`[LocalIM] Fallback 检查: enabled=${section.enabled}, isEnabled=${isEnabled}`);
+        //
+        //     if (isEnabled) {
+        //         api.logger?.info('[LocalIM] 正在尝试 Fallback 启动流程...');
+        //
+        //         try {
+        //             // 1. 获取所有账号 ID
+        //             const accountId = await ncLocalImPlugin.config.listAccountIds(cfg);
+        //             api.logger?.info(`[LocalIM] 发现账号列表: ${JSON.stringify(accountId)}`);
+        //
+        //             api.logger?.info(`[LocalIM] 准备启动账号: ${accountId}`);
+        //             const account = await ncLocalImPlugin.config.resolveAccount(cfg, accountId);
+        //             const startCtx = {
+        //                 account,
+        //                 cfg,
+        //                 log: api.logger,
+        //                 runtime: (api as any).runtime || {}
+        //             };
+        //
+        //             if (ncLocalImPlugin.gateway && ncLocalImPlugin.gateway.startAccount) {
+        //                 api.logger?.info(`[LocalIM] 通过 gateway.startAccount 启动: ${accountId}`);
+        //                 await ncLocalImPlugin.gateway.startAccount(startCtx);
+        //             } else {
+        //                 api.logger?.info(`[LocalIM] 通过直接 start 启动: ${accountId}`);
+        //                 await ncLocalImPlugin.start(startCtx);
+        //             }
+        //
+        //         } catch (e: any) {
+        //             api.logger?.error(`[LocalIM] Fallback 启动过程异常: ${e.message}\n${e.stack}`);
+        //         }
+        //     }
+        // }, 15000);
     },
 });

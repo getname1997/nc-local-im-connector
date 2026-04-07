@@ -436,8 +436,18 @@ export interface StartContext {
   abortSignal?: AbortSignal;
   log?: any;
 }
+let started = false;
 
 export async function startLocalImServer(ctx: StartContext): Promise<{ stop: () => void; isHealthy: () => boolean }> {
+  if (started) {
+    ctx.log?.warn('[LocalIM] 已经启动过，忽略重复启动');
+    return {
+      stop: () => {},
+      isHealthy: () => true,
+    };
+  }
+  started = true;
+
   console.log('>>> [LocalIM] startLocalImServer 被调用了！');
   const { account, cfg, abortSignal, log } = ctx;
   console.log('>>> [LocalIM] 启动配置:', JSON.stringify(account.config));
