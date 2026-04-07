@@ -21,12 +21,14 @@ import {
 // ============ 类型定义 ============
 
 export interface LocalIMConfig {
+  // accounts: boolean;
   enabled: boolean;
   connectionMode: 'server' | 'client';
   clientWsUrl?: string;
   wsPort?: number;
   httpPort?: number;
   gatewayToken?: string;
+  accountId: string;
   tokenType?: 'Bearer' | 'ApiKey';
 }
 
@@ -83,36 +85,38 @@ export function getConfig(cfg: OpenClawConfig): LocalIMConfig {
   } catch (e) {}
   return {
     enabled: true,
+    accountId: '__default__',
     connectionMode: 'server',
     wsPort: 3001,
     httpPort: 3002,
   };
 }
 
-function listAccountIds(cfg: OpenClawConfig): string[] {
+function listAccountIds(cfg: OpenClawConfig): string{
   try {
     const config = getConfig(cfg);
-    if (config.accounts && typeof config.accounts === 'object') {
-      return Object.keys(config.accounts);
-    }
+    // if (config.accounts && typeof config.accounts === 'object') {
+    //   return Object.keys(config.accounts);
+    // }
+    return config.accountId
   } catch (e) {}
-  return ['__default__'];
+  return '__default__';
 }
 
-function resolveAccount(cfg: OpenClawConfig, accountId?: string | null): ResolvedAccount {
+function resolveAccount(cfg: OpenClawConfig): ResolvedAccount {
   const config = getConfig(cfg);
-  const id = accountId || '__default__';
-  if (config.accounts?.[id]) {
-    return {
-      accountId: id,
-      config: { ...config, ...config.accounts[id] },
-      enabled: config.accounts[id].enabled !== false,
-    };
-  }
+  // const id = accountId || '__default__';
+  // if (config.accounts?.[id]) {
+  //   return {
+  //     accountId: id,
+  //     config: { ...config, ...config.accounts[id] },
+  //     enabled: config.accounts[id].enabled !== false,
+  //   };
+  // }
   return {
-    accountId: '__default__',
+    accountId: config.accountId || '__default__',
     config,
-    enabled: config.enabled !== false,
+    enabled: config.enabled,
   };
 }
 
@@ -139,8 +143,8 @@ function describeAccount(account: ResolvedAccount) {
   };
 }
 
-function inspectAccount(cfg: OpenClawConfig, accountId?: string | null) {
-  const account = resolveAccount(cfg, accountId);
+function inspectAccount(cfg: OpenClawConfig) {
+  const account = resolveAccount(cfg);
   const { config } = account;
   return {
     ...account,
@@ -619,49 +623,162 @@ export async function startLocalImServer(ctx: StartContext): Promise<{ stop: () 
       }, 5000);
     };
 
+    // const connectClient = () => {
+    //   if (stopped) return;
+    //   cleanupClient();
+    //
+    //   const clientWsUrl = config.clientWsUrl;
+    //   if (!clientWsUrl) {
+    //     log?.error('[LocalIM-Client] 未配置 clientWsUrl，无法启动长连接');
+    //     return;
+    //   }
+    //
+    //   let finalWsUrl = clientWsUrl;
+    //   if (!finalWsUrl.startsWith('ws://') && !finalWsUrl.startsWith('wss://')) {
+    //     finalWsUrl = `ws://${finalWsUrl}`;
+    //   }
+    //
+    //   const options: any = { handshakeTimeout: 10000 };
+    //   if (config.gatewayToken) {
+    //     options.headers = { 'Authorization': `Bearer ${config.gatewayToken}` };
+    //   }
+    //
+    //   log?.info(`[LocalIM-Client] 尝试长连接至: ${finalWsUrl}`);
+    //   try {
+    //     log?.debug(`[LocalIM-Client] WebSocket 实例化: url=${finalWsUrl}, protocols=${JSON.stringify(tryProtocols)}`);
+    //     wsClient = new WebSocket(finalWsUrl, tryProtocols, options);
+    //
+    //     let isAlive = true;
+    //
+    //     wsClient.on('unexpected-response', (req, res) => {
+    //       if (res.statusCode === 400 && tryProtocols) {
+    //         log?.warn(`[LocalIM-Client] 服务端拒绝了 subprotocol (${res.statusCode})，尝试无协议重连...`);
+    //         tryProtocols = undefined;
+    //         cleanupClient();
+    //         scheduleReconnect();
+    //       }
+    //     });
+    //
+    //     wsClient.on('open', () => {
+    //       log?.info('[LocalIM-Client] 长连接建立成功' + (tryProtocols ? ' (带认证协议)' : ' (无协议)'));
+    //       isAlive = true;
+    //       pingTimer = setInterval(() => {
+    //         if (!wsClient || wsClient.readyState !== WebSocket.OPEN) return;
+    //         if (isAlive === false) {
+    //           log?.warn('[LocalIM-Client] 心跳超时，正在断开连接...');
+    //           wsClient.terminate();
+    //           return;
+    //         }
+    //         isAlive = false;
+    //         wsClient.ping();
+    //       }, 30000);
+    //     });
+    //
+    //     wsClient.on('pong', () => { isAlive = true; });
+    //
+    //     wsClient.on('message', async (msg) => {
+    //       try {
+    //         const data = JSON.parse(msg.toString());
+    //         const { userId, conversationId, content } = data;
+    //         if (!userId || !content) {
+    //           log?.warn(`[LocalIM-Client] 收到无效消息负载: ${msg.toString().slice(0, 100)}`);
+    //           return;
+    //         }
+    //
+    //         log?.info(`[LocalIM-Client] 收到消息: from=${userId}, conv=${conversationId}, len=${content.length}`);
+    //
+    //         const sessionContext = buildSessionContext(userId, conversationId);
+    //         let reply = '';
+    //
+    //         for await (const chunk of streamFromGateway({
+    //           userContent: content, sessionContext, peerId: userId, gatewayPort: cfg.gateway?.port,
+    //           log, gatewayToken: config.gatewayToken, tokenType: config.tokenType || 'Bearer'
+    //         })) {
+    //           reply += chunk;
+    //           if (wsClient?.readyState === WebSocket.OPEN) {
+    //             wsClient.send(JSON.stringify({ type: 'stream', conversationId, content: reply }));
+    //           }
+    //         }
+    //         if (wsClient?.readyState === WebSocket.OPEN) {
+    //           wsClient.send(JSON.stringify({ type: 'done', conversationId, content: reply }));
+    //         }
+    //       } catch (err: any) {
+    //         log?.error(`[LocalIM-Client] 消息处理异常: ${err.message}`);
+    //         if (wsClient?.readyState === WebSocket.OPEN) {
+    //           wsClient.send(JSON.stringify({ error: err.message }));
+    //         }
+    //       }
+    //     });
+    //
+    //     wsClient.on('close', (code, reason) => {
+    //       log?.warn(`[LocalIM-Client] 长连接已断开: code=${code}, reason=${reason}`);
+    //       cleanupClient();
+    //       scheduleReconnect();
+    //     });
+    //
+    //     wsClient.on('error', (err: any) => {
+    //       log?.error(`[LocalIM-Client] WebSocket 异常: ${err.message}`);
+    //       if (err.message?.includes('subprotocol') && tryProtocols) {
+    //          tryProtocols = undefined;
+    //       }
+    //       cleanupClient();
+    //       scheduleReconnect();
+    //     });
+    //   } catch (err: any) {
+    //     log?.error(`[LocalIM-Client] 创建连接失败: ${err.message}`);
+    //     scheduleReconnect();
+    //   }
+    // };
+    // ============ 优化后的 Client 模式连接逻辑 ============
+
     const connectClient = () => {
       if (stopped) return;
       cleanupClient();
 
-      const clientWsUrl = config.clientWsUrl;
+      const { clientWsUrl, accountId, name, gatewayToken } = config;
       if (!clientWsUrl) {
         log?.error('[LocalIM-Client] 未配置 clientWsUrl，无法启动长连接');
         return;
       }
 
+      // 1. 自动拼接 accountId 到 URL 查询参数 (匹配服务端 urllib.parse 解析逻辑)
       let finalWsUrl = clientWsUrl;
       if (!finalWsUrl.startsWith('ws://') && !finalWsUrl.startsWith('wss://')) {
         finalWsUrl = `ws://${finalWsUrl}`;
       }
 
-      const options: any = { handshakeTimeout: 10000 };
-      if (config.gatewayToken) {
-        options.headers = { 'Authorization': `Bearer ${config.gatewayToken}` };
+      const urlObj = new URL(finalWsUrl);
+      urlObj.searchParams.set('accountId', accountId || 'default');
+      finalWsUrl = urlObj.toString();
+
+      // 2. 准备请求头和子协议
+      const options: any = {
+        handshakeTimeout: 100000,
+        headers: {}
+      };
+
+      // 如果有 token，同时尝试 Header 和 Subprotocol 两种方式（增加兼容性）
+      let protocols: string[] | undefined = undefined;
+      if (gatewayToken) {
+        options.headers['Authorization'] = `Bearer ${gatewayToken}`;
+        protocols = [gatewayToken];
       }
 
-      log?.info(`[LocalIM-Client] 尝试长连接至: ${finalWsUrl}`);
-      try {
-        log?.debug(`[LocalIM-Client] WebSocket 实例化: url=${finalWsUrl}, protocols=${JSON.stringify(tryProtocols)}`);
-        wsClient = new WebSocket(finalWsUrl, tryProtocols, options);
+      log?.info(`[LocalIM-Client] 正在连接 OpenClaw 服务端: ${finalWsUrl}`);
 
+      try {
+        wsClient = new WebSocket(finalWsUrl, options);
         let isAlive = true;
 
-        wsClient.on('unexpected-response', (req, res) => {
-          if (res.statusCode === 400 && tryProtocols) {
-            log?.warn(`[LocalIM-Client] 服务端拒绝了 subprotocol (${res.statusCode})，尝试无协议重连...`);
-            tryProtocols = undefined;
-            cleanupClient();
-            scheduleReconnect();
-          }
-        });
-
         wsClient.on('open', () => {
-          log?.info('[LocalIM-Client] 长连接建立成功' + (tryProtocols ? ' (带认证协议)' : ' (无协议)'));
+          log?.info(`[LocalIM-Client] ✅ 成功连接至服务端 [Account: ${accountId}, name: ${name}]`);
           isAlive = true;
+
+          // 定时发送 Ping 保持服务端 aliveClients 状态
           pingTimer = setInterval(() => {
             if (!wsClient || wsClient.readyState !== WebSocket.OPEN) return;
-            if (isAlive === false) {
-              log?.warn('[LocalIM-Client] 心跳超时，正在断开连接...');
+            if (!isAlive) {
+              log?.warn('[LocalIM-Client] 心跳响应超时，尝试重连...');
               wsClient.terminate();
               return;
             }
@@ -675,57 +792,72 @@ export async function startLocalImServer(ctx: StartContext): Promise<{ stop: () 
         wsClient.on('message', async (msg) => {
           try {
             const data = JSON.parse(msg.toString());
+            // 服务端发来的格式: { userId, conversationId, content }
             const { userId, conversationId, content } = data;
-            if (!userId || !content) {
-              log?.warn(`[LocalIM-Client] 收到无效消息负载: ${msg.toString().slice(0, 100)}`);
-              return;
-            }
 
-            log?.info(`[LocalIM-Client] 收到消息: from=${userId}, conv=${conversationId}, len=${content.length}`);
+            if (!content) return;
+
+            log?.info(`[LocalIM-Client] 收到指令 [Conv: ${conversationId}]`);
 
             const sessionContext = buildSessionContext(userId, conversationId);
-            let reply = '';
+            let lastFullContent = '';
 
+            // 3. 这里的流式输出必须携带 conversationId，否则服务端无法对应 Future
             for await (const chunk of streamFromGateway({
-              userContent: content, sessionContext, peerId: userId, gatewayPort: cfg.gateway?.port,
-              log, gatewayToken: config.gatewayToken, tokenType: config.tokenType || 'Bearer'
+              userContent: content,
+              sessionContext,
+              peerId: userId,
+              gatewayPort: cfg.gateway?.port,
+              log,
+              gatewayToken: config.gatewayToken,
+              tokenType: config.tokenType || 'Bearer'
             })) {
-              reply += chunk;
+              lastFullContent += chunk;
               if (wsClient?.readyState === WebSocket.OPEN) {
-                wsClient.send(JSON.stringify({ type: 'stream', conversationId, content: reply }));
+                wsClient.send(JSON.stringify({
+                  type: 'stream',
+                  conversationId, // 必须！用于服务端 handle_message
+                  content: lastFullContent
+                }));
               }
             }
+
+            // 4. 发送完成信号
             if (wsClient?.readyState === WebSocket.OPEN) {
-              wsClient.send(JSON.stringify({ type: 'done', conversationId, content: reply }));
+              wsClient.send(JSON.stringify({
+                type: 'done',
+                conversationId, // 必须！用于服务端触发 set_result
+                content: lastFullContent
+              }));
             }
           } catch (err: any) {
-            log?.error(`[LocalIM-Client] 消息处理异常: ${err.message}`);
+            log?.error(`[LocalIM-Client] 业务处理异常: ${err.message}`);
             if (wsClient?.readyState === WebSocket.OPEN) {
               wsClient.send(JSON.stringify({ error: err.message }));
             }
           }
         });
 
+        // 5. 增强的错误处理与退避重连
         wsClient.on('close', (code, reason) => {
-          log?.warn(`[LocalIM-Client] 长连接已断开: code=${code}, reason=${reason}`);
-          cleanupClient();
-          scheduleReconnect();
+          if (!stopped) {
+            log?.warn(`[LocalIM-Client] 连接断开 (Code: ${code}). 5秒后重连...`);
+            cleanupClient();
+            scheduleReconnect();
+          }
         });
 
         wsClient.on('error', (err: any) => {
-          log?.error(`[LocalIM-Client] WebSocket 异常: ${err.message}`);
-          if (err.message?.includes('subprotocol') && tryProtocols) {
-             tryProtocols = undefined;
-          }
-          cleanupClient();
-          scheduleReconnect();
+          log?.error(`[LocalIM-Client] WebSocket 错误: ${err.message}`);
+          // 如果是协议不支持导致的 400 错误，下次尝试不带 protocols
+          if (err.message?.includes('400')) protocols = undefined;
         });
+
       } catch (err: any) {
-        log?.error(`[LocalIM-Client] 创建连接失败: ${err.message}`);
+        log?.error(`[LocalIM-Client] 初始化连接失败: ${err.message}`);
         scheduleReconnect();
       }
     };
-
     connectClient();
   }
 
