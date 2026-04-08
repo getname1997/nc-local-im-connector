@@ -1,21 +1,28 @@
 /**
  * Public API exports for Local IM Channel Plugin
- * 
+ *
  * Provides external interfaces for interacting with the plugin
  */
 
 export type {
   LocalIMConfig,
-  ResolvedAccount,
+  LocalIMAccountConfig,
+  ResolvedLocalIMAccount,
+  SessionContext,
+  GatewayOptions,
+  StartContext,
   ServerRuntimeState,
   ClientRuntimeState,
-  StartContext,
-} from './src/channel.js';
+} from './src/types/index.js';
 
 export {
-  ncLocalImPlugin,
-  startLocalImServer,
+  localIMPlugin,
+  resolveLocalIMAccount,
+  listLocalIMAccountIds,
+  resolveDefaultLocalIMAccountId,
 } from './src/channel.js';
+
+export { monitorLocalIMProvider } from './src/core/provider.js';
 
 /**
  * Get current connection status

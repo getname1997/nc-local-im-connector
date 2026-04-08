@@ -1,160 +1,80 @@
 /**
  * Local IM Connector Plugin for OpenClaw
  *
- * 提供本地 WebSocket 和 HTTP 服务，允许外部应用通过标准接口与 OpenClaw 智能体对话。
- * [New] 支持 Client 长连接模式（类似钉钉 Stream 模式），主动连接外部网关并保持心跳。
- *
- * 基于 OpenClaw 2026.3.24-beta.2 SDK 重构
+ * 基于 OpenClaw SDK 重构，参考钉钉插件架构
+ * - 支持多账号配置
+ * - 使用 Provider 模式管理连接
+ * - 状态报告给框架
  */
 
-import WebSocket, { WebSocketServer } from 'ws';
-import express from 'express';
-import * as http from 'http';
+import type { ChannelPlugin, ClawdbotConfig } from "openclaw/plugin-sdk";
 import {
-  createChatChannelPlugin,
-  createChannelPluginBase,
-  type OpenClawConfig,
-  type PluginRuntime,
-  type ChannelConfigSchema,
-} from 'openclaw/plugin-sdk/core';
+  DEFAULT_ACCOUNT_ID,
+  listLocalIMAccountIds,
+  resolveLocalIMAccount,
+  resolveDefaultLocalIMAccountId,
+} from "./config/accounts.js";
+import { monitorLocalIMProvider } from "./core/provider.js";
+import { createLogger } from "./utils/logger.js";
+import type { ResolvedLocalIMAccount, LocalIMConfig } from "./types/index.ts";
 
-// ============ 类型定义 ============
+const meta = {
+  id: "nc-local-im-connector",
+  label: "Local IM",
+  selectionLabel: "Local IM (本地通信)",
+  docsPath: "/channels/nc-local-im-connector",
+  docsLabel: "nc-local-im-connector",
+  blurb: "本地 WebSocket/HTTP 连接器，支持 Server 监听模式和 Client 长连接模式。",
+  aliases: ["local", "nc"] as string[],
+  order: 80,
+};
 
-export interface LocalIMConfig {
-  // accounts: boolean;
-  enabled: boolean;
-  connectionMode: 'server' | 'client';
-  clientWsUrl?: string;
-  wsPort?: number;
-  httpPort?: number;
-  gatewayToken?: string;
-  accountId: string;
-  tokenType?: 'Bearer' | 'ApiKey';
-}
-
-export interface ResolvedAccount {
-  accountId: string;
-  config: LocalIMConfig;
-  enabled: boolean;
-}
-
-interface SessionContext {
-  channel: string;
-  accountId: string;
-  chatType: 'direct' | 'group';
-  peerId: string;
-  conversationId?: string;
-}
-
-interface GatewayOptions {
-  userContent: string;
-  sessionContext: SessionContext;
-  peerId?: string;
-  gatewayPort?: number;
-  log?: any;
-  gatewayToken?: string;
-  tokenType?: 'Bearer' | 'ApiKey';
-}
-
-// ============ 全局 Runtime ============
-
-let runtime: any | null = null;
-
-export function getRuntime(): any {
-  if (!runtime) {
-    // 降级尝试从 global 获取 (针对旧版 SDK 兼容)
-    const gRt = (globalThis as any).__OPENCLAW_PLUGIN_RUNTIME__;
-    if (gRt) return gRt;
-    throw new Error('Local IM runtime not initialized');
-  }
-  return runtime;
-}
-
-export function setRuntime(rt: any) {
-  runtime = rt;
-}
-
-// 活跃连接映射，已废弃
-
-// ============ 配置管理 ============
-
-export function getConfig(cfg: OpenClawConfig): LocalIMConfig {
-  try {
-    const section = (cfg.channels as any)?.['nc-local-im-connector'];
-    if (section && typeof section === 'object') return section;
-  } catch (e) {}
+/**
+ * 构建默认运行时状态
+ */
+function createDefaultRuntimeState(accountId: string) {
   return {
-    enabled: true,
-    accountId: '__default__',
-    connectionMode: 'server',
-    wsPort: 3001,
-    httpPort: 3002,
+    accountId,
+    running: false,
+    lastStartAt: null as number | null,
+    lastStopAt: null as number | null,
+    lastError: null as string | null,
+    connected: null as boolean | null,
+    lastConnectedAt: null as number | null,
+    lastInboundAt: null as number | null,
   };
 }
 
-function listAccountIds(cfg: OpenClawConfig): string{
-  try {
-    const config = getConfig(cfg);
-    // if (config.accounts && typeof config.accounts === 'object') {
-    //   return Object.keys(config.accounts);
-    // }
-    return config.accountId
-  } catch (e) {}
-  return '__default__';
+/**
+ * 检查账号是否已配置
+ */
+function isAccountConfigured(account: ResolvedLocalIMAccount): boolean {
+  return account.configured;
 }
 
-function resolveAccount(cfg: OpenClawConfig): ResolvedAccount {
-  const config = getConfig(cfg);
-  // const id = accountId || '__default__';
-  // if (config.accounts?.[id]) {
-  //   return {
-  //     accountId: id,
-  //     config: { ...config, ...config.accounts[id] },
-  //     enabled: config.accounts[id].enabled !== false,
-  //   };
-  // }
-  return {
-    accountId: config.accountId || '__default__',
-    config,
-    enabled: config.enabled,
-  };
-}
-
-function defaultAccountId(): string {
-  return '__default__';
-}
-
-function isConfigured(account: ResolvedAccount): boolean {
-  const config = account?.config || {};
-  if (config.connectionMode === 'client') {
-    return Boolean(config.clientWsUrl);
-  }
-  return Boolean(config.wsPort && config.httpPort);
-}
-
-function describeAccount(account: ResolvedAccount) {
+/**
+ * 描述账号
+ */
+function describeAccount(account: ResolvedLocalIMAccount) {
   return {
     accountId: account.accountId,
-    name: account.config?.name || 'Local IM',
     enabled: account.enabled,
-    configured: account.config?.connectionMode === 'client'
-        ? Boolean(account.config?.clientWsUrl)
-        : Boolean(account.config?.wsPort && account.config?.httpPort),
+    configured: account.configured,
+    name: account.name,
+    connectionMode: account.config.connectionMode,
   };
 }
 
-function inspectAccount(cfg: OpenClawConfig) {
-  const account = resolveAccount(cfg);
+/**
+ * 检查账号配置（用于状态报告）
+ */
+function inspectAccount(cfg: ClawdbotConfig, accountId?: string) {
+  const account = resolveLocalIMAccount({ cfg, accountId: accountId || DEFAULT_ACCOUNT_ID });
   const { config } = account;
-  return {
-    ...account,
-    ..._inspectAccountInternal(config, account.enabled)
-  };
-}
 
-function _inspectAccountInternal(config: LocalIMConfig, enabled: boolean) {
   let configured = false;
   let endpoint = '';
+
   if (config.connectionMode === 'client') {
     configured = Boolean(config.clientWsUrl);
     endpoint = config.clientWsUrl || '';
@@ -164,7 +84,8 @@ function _inspectAccountInternal(config: LocalIMConfig, enabled: boolean) {
   }
 
   return {
-    enabled,
+    ...account,
+    enabled: account.enabled,
     configured,
     tokenStatus: config.gatewayToken ? 'available' : 'missing',
     connectionMode: config.connectionMode,
@@ -172,714 +93,303 @@ function _inspectAccountInternal(config: LocalIMConfig, enabled: boolean) {
   };
 }
 
-// ============ Session 构建 ============
+/**
+ * 探测账号状态
+ */
+async function probeAccount(account: ResolvedLocalIMAccount): Promise<{
+  ok: boolean;
+  status: string;
+  detail: string;
+}> {
+  const { config, enabled, configured } = account;
 
-function buildSessionContext(userId: string, conversationId?: string): SessionContext {
+  if (!enabled) {
+    return { ok: false, status: 'disabled', detail: 'Account is disabled' };
+  }
+
+  if (!configured) {
+    return { ok: false, status: 'unconfigured', detail: 'Account is not configured' };
+  }
+
   return {
-    channel: 'nc-local-im-connector',
-    accountId: '__default__',
-    chatType: 'direct',
-    peerId: userId,
-    conversationId,
+    ok: true,
+    status: 'online',
+    detail: `${config.connectionMode.toUpperCase()} mode: ${
+        config.connectionMode === 'client'
+            ? config.clientWsUrl
+            : `WS:${config.wsPort}, HTTP:${config.httpPort}`
+    }`,
   };
 }
-
-// ============ Gateway 流式通信 ============
 
 /**
- * 封装与 OpenClaw Gateway 的流式通信
+ * 规范化目标
  */
-async function* streamFromGateway(options: GatewayOptions): AsyncGenerator<string, void, unknown> {
-  const { userContent, sessionContext, peerId, gatewayPort, log, gatewayToken, tokenType = 'Bearer' } = options;
-  const rt = getRuntime();
-  const port = gatewayPort || rt.gateway?.port || 18789;
-  const gatewayUrl = `http://127.0.0.1:${port}/v1/chat/completions`;
-
-  const messages = [
-    { role: 'user', content: userContent }
-  ];
-
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    'X-OpenClaw-Agent-Id': 'main',
-  };
-
-  const memoryUser = `${sessionContext.channel}:${sessionContext.accountId}:${sessionContext.peerId}`;
-  headers['X-OpenClaw-Memory-User'] = Buffer.from(memoryUser, 'utf-8').toString('base64');
-
-  if (gatewayToken) {
-    if (tokenType === 'Bearer') {
-      headers['Authorization'] = `Bearer ${gatewayToken}`;
-    } else if (tokenType === 'ApiKey') {
-      headers['X-API-Key'] = gatewayToken;
-    }
-    log?.info?.(`[LocalIM] 使用 ${tokenType} Token 认证`);
-  }
-
-  const response = await fetch(gatewayUrl, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify({
-      model: 'openclaw',
-      messages,
-      stream: true,
-      user: JSON.stringify(sessionContext),
-    }),
-  });
-
-  if (!response.ok || !response.body) {
-    const errText = response.body ? await response.text() : '(no body)';
-    if (response.status === 401 || response.status === 403) {
-      if (!gatewayToken) {
-        throw new Error(`Gateway 认证失败 (${response.status}): Gateway 需要认证，请在插件配置中设置 gatewayToken`);
-      } else {
-        throw new Error(`Gateway 认证失败 (${response.status}): Token 无效或已过期，请检查 gatewayToken 配置`);
-      }
-    }
-    throw new Error(`Gateway error: ${response.status} - ${errText}`);
-  }
-
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = '';
-
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split('\n');
-    buffer = lines.pop() || '';
-
-    for (const line of lines) {
-      if (!line.startsWith('data: ')) continue;
-      const data = line.slice(6).trim();
-      if (data === '[DONE]') return;
-
-      try {
-        const chunk = JSON.parse(data);
-        const content = chunk.choices?.[0]?.delta?.content;
-        if (content) yield content;
-      } catch {}
-    }
-  }
+function normalizeTarget(raw: string): string | null {
+  if (!raw || typeof raw !== 'string') return null;
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  return trimmed;
 }
 
-// ============ Channel Plugin 定义 ============
+/**
+ * 检查是否像本地 IM ID
+ */
+function looksLikeId(raw: string): boolean {
+  return typeof raw === 'string' && raw.length > 0 && !raw.includes(' ');
+}
 
-const pluginObject = createChatChannelPlugin<ResolvedAccount>({
-  base: createChannelPluginBase({
-    id: 'nc-local-im-connector',
-    setup: {
-      resolveAccount,
-      // 注意：setup 中一般不直接提供 listAccountIds，而是在 config 中提供
-      defaultAccountId,
-      isConfigured,
-      describeAccount,
-      inspectAccount,
-    },
-  }),
-  // DM 安全配置
-  security: {
-    dm: {
-      channelKey: 'nc-local-im-connector',
-      resolvePolicy: () => 'allowlist',
-      resolveAllowFrom: () => [],
-      defaultPolicy: 'allowlist',
+// ============ 插件定义 ============
+
+export const localIMPlugin: ChannelPlugin<ResolvedLocalIMAccount> = {
+  id: "nc-local-im-connector",
+  meta: {
+    ...meta,
+  },
+  pairing: {
+    idLabel: "localUserId",
+    normalizeAllowEntry: (entry) => entry.trim(),
+    notifyApproval: async ({ cfg, id }) => {
+      const log = createLogger(false, 'LocalIM:Pairing');
+      log.info(`Pairing approved for user: ${id}`);
     },
   },
-  // 线程配置
-  threading: {
-    topLevelReplyToMode: 'reply',
-    getThreadSessionKeys: async (p: any) => ({
-      channel: p.channel,
-      accountId: p.accountId,
-      threadId: p.threadId || p.messageId,
+  capabilities: {
+    chatTypes: ["direct"],
+    polls: false,
+    threads: false,
+    media: false,
+    reactions: false,
+    edit: false,
+    reply: false,
+  },
+  agentPrompt: {
+    messageToolHints: () => [
+      "- Local IM targeting: omit `target` to reply to the current conversation.",
+    ],
+  },
+  reload: { configPrefixes: ["channels.nc-local-im-connector"] },
+  config: {
+    listAccountIds: (cfg) => listLocalIMAccountIds(cfg),
+    resolveAccount: (cfg, accountId) => resolveLocalIMAccount({ cfg, accountId }),
+    defaultAccountId: (cfg) => resolveDefaultLocalIMAccountId(cfg),
+    setAccountEnabled: ({ cfg, accountId, enabled }) => {
+      const isDefault = accountId === DEFAULT_ACCOUNT_ID;
+
+      if (isDefault) {
+        return {
+          ...cfg,
+          channels: {
+            ...cfg.channels,
+            "nc-local-im-connector": {
+              ...cfg.channels?.["nc-local-im-connector"],
+              enabled,
+            },
+          },
+        };
+      }
+
+      const localIMCfg = cfg.channels?.["nc-local-im-connector"] as LocalIMConfig | undefined;
+      return {
+        ...cfg,
+        channels: {
+          ...cfg.channels,
+          "nc-local-im-connector": {
+            ...localIMCfg,
+            accounts: {
+              ...localIMCfg?.accounts,
+              [accountId]: {
+                ...localIMCfg?.accounts?.[accountId],
+                enabled,
+              },
+            },
+          },
+        },
+      };
+    },
+    deleteAccount: ({ cfg, accountId }) => {
+      const isDefault = accountId === DEFAULT_ACCOUNT_ID;
+
+      if (isDefault) {
+        const next = { ...cfg } as ClawdbotConfig;
+        const nextChannels = { ...cfg.channels };
+        delete (nextChannels as Record<string, unknown>)["nc-local-im-connector"];
+        if (Object.keys(nextChannels).length > 0) {
+          next.channels = nextChannels;
+        } else {
+          delete next.channels;
+        }
+        return next;
+      }
+
+      const localIMCfg = cfg.channels?.["nc-local-im-connector"] as LocalIMConfig | undefined;
+      const accounts = { ...localIMCfg?.accounts };
+      delete accounts[accountId];
+
+      return {
+        ...cfg,
+        channels: {
+          ...cfg.channels,
+          "nc-local-im-connector": {
+            ...localIMCfg,
+            accounts: Object.keys(accounts).length > 0 ? accounts : undefined,
+          },
+        },
+      };
+    },
+    isConfigured: isAccountConfigured,
+    describeAccount,
+    resolveAllowFrom: ({ cfg, accountId }) => {
+      const account = resolveLocalIMAccount({ cfg, accountId });
+      return [];
+    },
+    formatAllowFrom: ({ allowFrom }) => allowFrom.map((e) => String(e).trim()).filter(Boolean),
+  },
+  security: {
+    collectWarnings: ({ cfg, accountId }) => {
+      return [];
+    },
+  },
+  setup: {
+    resolveAccountId: () => DEFAULT_ACCOUNT_ID,
+    applyAccountConfig: ({ cfg, accountId }) => {
+      const isDefault = !accountId || accountId === DEFAULT_ACCOUNT_ID;
+
+      if (isDefault) {
+        return {
+          ...cfg,
+          channels: {
+            ...cfg.channels,
+            "nc-local-im-connector": {
+              ...cfg.channels?.["nc-local-im-connector"],
+              enabled: true,
+            },
+          },
+        };
+      }
+
+      const localIMCfg = cfg.channels?.["nc-local-im-connector"] as LocalIMConfig | undefined;
+      return {
+        ...cfg,
+        channels: {
+          ...cfg.channels,
+          "nc-local-im-connector": {
+            ...localIMCfg,
+            accounts: {
+              ...localIMCfg?.accounts,
+              [accountId]: {
+                ...localIMCfg?.accounts?.[accountId],
+                enabled: true,
+              },
+            },
+          },
+        },
+      };
+    },
+  },
+  messaging: {
+    normalizeTarget: (raw) => normalizeTarget(raw) ?? undefined,
+    targetResolver: {
+      looksLikeId,
+      hint: "<userId>",
+    },
+  },
+  directory: {
+    self: async () => null,
+    listPeers: async () => [],
+    listGroups: async () => [],
+    listPeersLive: async () => [],
+    listGroupsLive: async () => [],
+  },
+  status: {
+    defaultRuntime: createDefaultRuntimeState(DEFAULT_ACCOUNT_ID) as any,
+    buildChannelSummary: ({ snapshot }) => ({
+      configured: snapshot.configured ?? false,
+      probe: snapshot.probe,
+      lastProbeAt: snapshot.lastProbeAt ?? null,
+    }),
+    probeAccount: async ({ account }) => await probeAccount(account),
+    buildAccountSnapshot: ({ account, runtime, probe }) => ({
+      accountId: account.accountId,
+      enabled: account.enabled,
+      configured: account.configured,
+      name: account.name,
+      running: runtime?.running ?? false,
+      lastStartAt: runtime?.lastStartAt ?? null,
+      lastStopAt: runtime?.lastStopAt ?? null,
+      lastError: runtime?.lastError ?? null,
+      // 连接状态和消息时间戳：由 startAccount 里的 onStatusChange 回调写入 runtime
+      connected: runtime?.connected ?? undefined,
+      lastConnectedAt: runtime?.lastConnectedAt ?? undefined,
+      lastInboundAt: runtime?.lastInboundAt ?? undefined,
+      probe,
     }),
   },
-  // 出站能力
-  outbound: {
-    attachedResults: {
-      sendText: async (params) => {
-        // 由于现在的逻辑是 Inbound 直接返回响应，Outbound 逻辑目前主要用于系统主动推送（若有）
-        // 这里暂时保留简单的日志记录，因为 WebSocket 响应已经在 startLocalImServer 中处理了
-        return { messageId: `msg_${Date.now()}` };
-      },
-    },
-    base: {
-      sendMedia: async (params) => {
-        console.warn('sendMedia not implemented in local-im');
-      },
-    },
-  },
-  // 状态检查
-  status: {
-    probe: async (account) => {
-      const { configured, enabled, connectionMode, endpoint } = _inspectAccountInternal(account.config, account.enabled);
-      return {
-        ok: enabled && configured,
-        status: enabled ? (configured ? 'online' : 'unconfigured') : 'disabled',
-        detail: `${connectionMode.toUpperCase()} mode: ${endpoint}`,
-      };
-    }
-  },
-  // 绑定配置
-  bindings: {
-    getAccountBindings: async () => [],
-    getConversationBindings: async () => [],
-    listConfiguredBindings: async () => [],
-  },
-  // 启动服务逻辑
   gateway: {
-    startAccount: async (ctx: any) => {
-      console.log('>>> [LocalIM] gateway.startAccount 被调用了！');
-      const startResult = await startLocalImServer({
-        account: ctx.account,
-        cfg: ctx.cfg,
-        abortSignal: ctx.abortSignal,
-        log: ctx.log || ctx.runtime?.logger,
-      });
-      (ctx as any)._stop = startResult.stop;
-      return startResult;
-    },
-    stopAccount: async (ctx: any) => {
-      console.log('>>> [LocalIM] gateway.stopAccount 被调用了！');
-      if ((ctx as any)._stop) {
-        (ctx as any)._stop();
-      }
-    }
-  },
-  start: startLocalImServer,
-  // 兼容性字段：在某些版本中，start 必须在 plugin 对象的一级属性中
-  plugin: {
-    start: startLocalImServer,
-  }
-});
+    startAccount: async (ctx) => {
+      const account = resolveLocalIMAccount({ cfg: ctx.cfg, accountId: ctx.accountId });
 
-// 强制显式注入 config 适配器和 setRuntime
-// 这是为了确保在 createChatChannelPlugin 可能忽略某些字段的情况下，插件对象仍然符合 ChannelPlugin 接口
-export const ncLocalImPlugin: any = {
-  ...pluginObject,
-  start: startLocalImServer,
-  gateway: pluginObject.gateway,
-  config: {
-    listAccountIds,
-    resolveAccount,
-    defaultAccountId,
-    isConfigured,
-    describeAccount,
-    inspectAccount,
-  },
-  configSchema: {
-    schema: {
-      type: "object",
-      properties: {
-        enabled: {
-          type: "boolean",
-          default: true,
-          description: "启用或禁用本地 IM 连接器"
-        },
-        connectionMode: {
-          type: "string",
-          enum: ["server", "client"],
-          default: "client",
-          description: "运行模式 (Server: 本地监听 / Client: 主动连接外部服务)"
-        },
-        clientWsUrl: {
-          type: "string",
-          default: "ws://192.168.100.168:8080",
-          description: "Client 模式下要连接的 WebSocket 地址"
-        },
-        wsPort: {
-          type: "number",
-          default: 3001,
-          description: "Server 模式下 WebSocket 服务端口"
-        },
-        httpPort: {
-          type: "number",
-          default: 3002,
-          description: "Server 模式下 HTTP 服务端口"
-        },
-        gatewayToken: {
-          type: "string",
-          description: "Gateway 认证令牌"
-        },
-        tokenType: {
-          type: "string",
-          enum: ["Bearer", "ApiKey"],
-          default: "Bearer",
-          description: "令牌类型"
-        }
+      // 检查账号是否启用和配置
+      if (!account.enabled) {
+        ctx.log?.info?.(`nc-local-im-connector[${ctx.accountId}] is disabled, skipping startup`);
+        return new Promise<void>((resolve) => {
+          if (ctx.abortSignal?.aborted) {
+            resolve();
+            return;
+          }
+          ctx.abortSignal?.addEventListener('abort', () => resolve(), { once: true });
+        });
       }
-    }
+
+      if (!account.configured) {
+        throw new Error(`Local IM account "${ctx.accountId}" is not properly configured`);
+      }
+
+      // 当前版本只支持 Client 模式
+      if (account.config.connectionMode !== 'client') {
+        ctx.log?.warn?.(`nc-local-im-connector[${ctx.accountId}] Server 模式在当前版本已弃用，请使用 Client 模式`);
+        return new Promise<void>((resolve) => {
+          if (ctx.abortSignal?.aborted) {
+            resolve();
+            return;
+          }
+          ctx.abortSignal?.addEventListener('abort', () => resolve(), { once: true });
+        });
+      }
+
+      ctx.setStatus({ accountId: ctx.accountId, running: true, lastStartAt: Date.now() });
+      ctx.log?.info(`starting nc-local-im-connector[${ctx.accountId}] (mode: client)`);
+
+      // 把 ctx.setStatus 包装成 onStatusChange 回调
+      // 注意：ctx.setStatus 是完全替换而非 merge patch，必须先 getStatus() 获取当前快照再合并
+      const onStatusChange = (patch: Record<string, unknown>) => {
+        const currentSnapshot = ctx.getStatus?.() ?? { accountId: ctx.accountId };
+        const nextSnapshot = { ...currentSnapshot, ...patch, accountId: ctx.accountId };
+        ctx.setStatus(nextSnapshot as any);
+      };
+
+      try {
+        return await monitorLocalIMProvider({
+          config: ctx.cfg,
+          runtime: ctx.runtime,
+          abortSignal: ctx.abortSignal,
+          accountId: ctx.accountId,
+          onStatusChange,
+        });
+      } catch (err: any) {
+        ctx.log?.error(`[nc-local-im-connector][${ctx.accountId}] startAccount error: ${err?.message ?? err}`);
+        ctx.setStatus({
+          accountId: ctx.accountId,
+          running: false,
+          lastStopAt: Date.now(),
+          lastError: err?.message || String(err),
+        });
+        throw err;
+      }
+    },
   },
-  setRuntime,
 };
 
-// ============ 服务启动逻辑 ============
-
-export interface ServerRuntimeState {
-  wss?: WebSocketServer;
-  httpServer?: http.Server;
-  heartbeatInterval?: NodeJS.Timeout;
-}
-
-export interface ClientRuntimeState {
-  wsClient?: WebSocket;
-  reconnectTimer?: NodeJS.Timeout;
-  pingTimer?: NodeJS.Timeout;
-}
-
-export interface StartContext {
-  account: ResolvedAccount;
-  cfg: OpenClawConfig;
-  abortSignal?: AbortSignal;
-  log?: any;
-}
-let started = false;
-
-export async function startLocalImServer(ctx: StartContext): Promise<{ stop: () => void; isHealthy: () => boolean }> {
-  if (started) {
-    ctx.log?.warn('[LocalIM] 已经启动过，忽略重复启动');
-    return {
-      stop: () => {},
-      isHealthy: () => true,
-    };
-  }
-  started = true;
-
-  console.log('>>> [LocalIM] startLocalImServer 被调用了！');
-  const { account, cfg, abortSignal, log } = ctx;
-  console.log('>>> [LocalIM] 启动配置:', JSON.stringify(account.config));
-  log?.info(`[LocalIM-Server] 正在启动服务...`);
-  const config = account.config;
-  const mode = config.connectionMode || 'server';
-
-  // 这里的 start 方法是 SDK 传入的，确保我们在 runtime 里存一份，方便后续使用
-  // 注意：在 SDK 2026.3 版本中，start 可能由 runtime 调用，
-  // 我们已经在 index.ts 中通过 registerFull 等待 runtime 初始化了。
-  // 但在 start 方法里直接使用 ctx 也是标准做法。
-
-  let stopped = false;
-  let doStop = (reason: string) => {};
-
-  if (mode === 'server') {
-    // ==========================================
-    // SERVER 模式：本地监听 (增强版：附带长连接心跳与 SSE 支持)
-    // ==========================================
-    const wsPort = config.wsPort || 3001;
-    const httpPort = config.httpPort || 3002;
-    log?.info(`[LocalIM-Server] 正在启动服务... (WS: ${wsPort}, HTTP: ${httpPort})`);
-
-    // 1. WebSocket 服务 (带长连接心跳)
-    const wss = new WebSocketServer({ port: wsPort });
-    const aliveClients = new WeakSet<WebSocket>();
-
-    // 服务端心跳检测：每 30 秒清理一次断开的死连接
-    const heartbeatInterval = setInterval(() => {
-      wss.clients.forEach((ws) => {
-        if (!aliveClients.has(ws)) return ws.terminate();
-        aliveClients.delete(ws);
-        ws.ping();
-      });
-    }, 30000);
-
-    wss.on('connection', (ws) => {
-      aliveClients.add(ws);
-      ws.on('pong', () => aliveClients.add(ws)); // 收到 pong 则更新活跃状态
-
-      ws.on('message', async (msg) => {
-        try {
-          const data = JSON.parse(msg.toString());
-          const { userId, conversationId, content } = data;
-          if (!userId || !content) return ws.send(JSON.stringify({ error: 'invalid payload' }));
-
-          log?.info(`[LocalIM-Server] 收到消息: from=${userId}, conv=${conversationId}, len=${content.length}`);
-
-          const sessionContext = buildSessionContext(userId, conversationId);
-          let reply = '';
-
-          for await (const chunk of streamFromGateway({
-            userContent: content,
-            sessionContext,
-            peerId: userId,
-            gatewayPort: cfg.gateway?.port,
-            log,
-            gatewayToken: config.gatewayToken,
-            tokenType: config.tokenType || 'Bearer',
-          })) {
-            reply += chunk;
-            ws.send(JSON.stringify({ type: 'stream', conversationId, content: reply }));
-          }
-          ws.send(JSON.stringify({ type: 'done', conversationId, content: reply }));
-        } catch (err: any) {
-          log?.error(`[LocalIM-Server] WS 处理错误: ${err.message}`);
-          ws.send(JSON.stringify({ error: err.message }));
-        }
-      });
-
-      ws.on('close', () => {
-        // 清理活跃连接？需要知道是哪个 userId，比较麻烦，暂且让它在 outbound 时失败或覆盖
-      });
-    });
-
-    // 2. HTTP 服务 (增加 SSE 接口支持长连接)
-    const app = express();
-    app.use(express.json());
-
-    // 原有 REST 接口：等待完成后返回
-    app.post('/chat', async (req, res) => {
-      const { userId, conversationId, content } = req.body;
-      if (!userId || !content) return res.status(400).json({ error: 'invalid params' });
-
-      const sessionContext = buildSessionContext(userId, conversationId);
-      let reply = '';
-      try {
-        for await (const chunk of streamFromGateway({
-          userContent: content, sessionContext, peerId: userId, gatewayPort: cfg.gateway?.port,
-          log, gatewayToken: config.gatewayToken, tokenType: config.tokenType || 'Bearer'
-        })) { reply += chunk; }
-        res.json({ reply });
-      } catch (err: any) {
-        res.status(500).json({ error: err.message });
-      }
-    });
-
-    // 新增 SSE 接口：支持单向 HTTP 长连接流式输出
-    app.post('/chat/stream', async (req, res) => {
-      const { userId, conversationId, content } = req.body;
-      if (!userId || !content) return res.status(400).json({ error: 'invalid params' });
-
-      res.setHeader('Content-Type', 'text/event-stream');
-      res.setHeader('Cache-Control', 'no-cache');
-      res.setHeader('Connection', 'keep-alive');
-
-      const sessionContext = buildSessionContext(userId, conversationId);
-      try {
-        for await (const chunk of streamFromGateway({
-          userContent: content, sessionContext, peerId: userId, gatewayPort: cfg.gateway?.port,
-          log, gatewayToken: config.gatewayToken, tokenType: config.tokenType || 'Bearer'
-        })) {
-          res.write(`data: ${JSON.stringify({ type: 'stream', conversationId, chunk })}\n\n`);
-        }
-        res.write(`data: ${JSON.stringify({ type: 'done', conversationId })}\n\n`);
-        res.end();
-      } catch (err: any) {
-        res.write(`data: ${JSON.stringify({ error: err.message })}\n\n`);
-        res.end();
-      }
-    });
-
-    const httpServer = http.createServer(app);
-    httpServer.listen(httpPort);
-    log?.info(`[LocalIM-Server] 服务启动成功！`);
-
-    doStop = (reason: string) => {
-      if (stopped) return;
-      stopped = true;
-      log?.info(`[LocalIM-Server] 停止服务 (${reason})...`);
-      clearInterval(heartbeatInterval);
-      try { wss.close(); httpServer.close(); } catch (err: any) {}
-    };
-
-  } else if (mode === 'client') {
-
-    log?.info(`[LocalIM-Server] 正在启动服务...`);
-    // ==========================================
-    // CLIENT 模式：主动长连接 (参考钉钉 Stream 模式)
-    // ==========================================
-    let wsClient: WebSocket | null = null;
-    let reconnectTimer: NodeJS.Timeout | null = null;
-    let pingTimer: NodeJS.Timeout | null = null;
-    let tryProtocols = config.gatewayToken ? [config.gatewayToken] : undefined;
-
-    const doStop = (reason: string) => {
-      if (stopped) return;
-      stopped = true;
-      log?.info(`[LocalIM-Client] 停止客户端长连接 (${reason})...`);
-      cleanupClient();
-    };
-
-    const cleanupClient = () => {
-      if (reconnectTimer) {
-        clearTimeout(reconnectTimer);
-        reconnectTimer = null;
-      }
-      if (pingTimer) {
-        clearInterval(pingTimer);
-        pingTimer = null;
-      }
-      if (wsClient) {
-        wsClient.removeAllListeners();
-        try {
-          if (wsClient.readyState !== WebSocket.CLOSED) {
-            wsClient.terminate();
-          }
-        } catch (e) {}
-        wsClient = null;
-      }
-    };
-
-    const scheduleReconnect = () => {
-      if (stopped) return;
-      if (reconnectTimer) {
-        clearTimeout(reconnectTimer);
-        reconnectTimer = null;
-      }
-      log?.info('[LocalIM-Client] 5秒后尝试断线重连...');
-      reconnectTimer = setTimeout(() => {
-        reconnectTimer = null;
-        connectClient();
-      }, 5000);
-    };
-
-    // const connectClient = () => {
-    //   if (stopped) return;
-    //   cleanupClient();
-    //
-    //   const clientWsUrl = config.clientWsUrl;
-    //   if (!clientWsUrl) {
-    //     log?.error('[LocalIM-Client] 未配置 clientWsUrl，无法启动长连接');
-    //     return;
-    //   }
-    //
-    //   let finalWsUrl = clientWsUrl;
-    //   if (!finalWsUrl.startsWith('ws://') && !finalWsUrl.startsWith('wss://')) {
-    //     finalWsUrl = `ws://${finalWsUrl}`;
-    //   }
-    //
-    //   const options: any = { handshakeTimeout: 10000 };
-    //   if (config.gatewayToken) {
-    //     options.headers = { 'Authorization': `Bearer ${config.gatewayToken}` };
-    //   }
-    //
-    //   log?.info(`[LocalIM-Client] 尝试长连接至: ${finalWsUrl}`);
-    //   try {
-    //     log?.debug(`[LocalIM-Client] WebSocket 实例化: url=${finalWsUrl}, protocols=${JSON.stringify(tryProtocols)}`);
-    //     wsClient = new WebSocket(finalWsUrl, tryProtocols, options);
-    //
-    //     let isAlive = true;
-    //
-    //     wsClient.on('unexpected-response', (req, res) => {
-    //       if (res.statusCode === 400 && tryProtocols) {
-    //         log?.warn(`[LocalIM-Client] 服务端拒绝了 subprotocol (${res.statusCode})，尝试无协议重连...`);
-    //         tryProtocols = undefined;
-    //         cleanupClient();
-    //         scheduleReconnect();
-    //       }
-    //     });
-    //
-    //     wsClient.on('open', () => {
-    //       log?.info('[LocalIM-Client] 长连接建立成功' + (tryProtocols ? ' (带认证协议)' : ' (无协议)'));
-    //       isAlive = true;
-    //       pingTimer = setInterval(() => {
-    //         if (!wsClient || wsClient.readyState !== WebSocket.OPEN) return;
-    //         if (isAlive === false) {
-    //           log?.warn('[LocalIM-Client] 心跳超时，正在断开连接...');
-    //           wsClient.terminate();
-    //           return;
-    //         }
-    //         isAlive = false;
-    //         wsClient.ping();
-    //       }, 30000);
-    //     });
-    //
-    //     wsClient.on('pong', () => { isAlive = true; });
-    //
-    //     wsClient.on('message', async (msg) => {
-    //       try {
-    //         const data = JSON.parse(msg.toString());
-    //         const { userId, conversationId, content } = data;
-    //         if (!userId || !content) {
-    //           log?.warn(`[LocalIM-Client] 收到无效消息负载: ${msg.toString().slice(0, 100)}`);
-    //           return;
-    //         }
-    //
-    //         log?.info(`[LocalIM-Client] 收到消息: from=${userId}, conv=${conversationId}, len=${content.length}`);
-    //
-    //         const sessionContext = buildSessionContext(userId, conversationId);
-    //         let reply = '';
-    //
-    //         for await (const chunk of streamFromGateway({
-    //           userContent: content, sessionContext, peerId: userId, gatewayPort: cfg.gateway?.port,
-    //           log, gatewayToken: config.gatewayToken, tokenType: config.tokenType || 'Bearer'
-    //         })) {
-    //           reply += chunk;
-    //           if (wsClient?.readyState === WebSocket.OPEN) {
-    //             wsClient.send(JSON.stringify({ type: 'stream', conversationId, content: reply }));
-    //           }
-    //         }
-    //         if (wsClient?.readyState === WebSocket.OPEN) {
-    //           wsClient.send(JSON.stringify({ type: 'done', conversationId, content: reply }));
-    //         }
-    //       } catch (err: any) {
-    //         log?.error(`[LocalIM-Client] 消息处理异常: ${err.message}`);
-    //         if (wsClient?.readyState === WebSocket.OPEN) {
-    //           wsClient.send(JSON.stringify({ error: err.message }));
-    //         }
-    //       }
-    //     });
-    //
-    //     wsClient.on('close', (code, reason) => {
-    //       log?.warn(`[LocalIM-Client] 长连接已断开: code=${code}, reason=${reason}`);
-    //       cleanupClient();
-    //       scheduleReconnect();
-    //     });
-    //
-    //     wsClient.on('error', (err: any) => {
-    //       log?.error(`[LocalIM-Client] WebSocket 异常: ${err.message}`);
-    //       if (err.message?.includes('subprotocol') && tryProtocols) {
-    //          tryProtocols = undefined;
-    //       }
-    //       cleanupClient();
-    //       scheduleReconnect();
-    //     });
-    //   } catch (err: any) {
-    //     log?.error(`[LocalIM-Client] 创建连接失败: ${err.message}`);
-    //     scheduleReconnect();
-    //   }
-    // };
-    // ============ 优化后的 Client 模式连接逻辑 ============
-
-    const connectClient = () => {
-      if (stopped) return;
-      cleanupClient();
-
-      const { clientWsUrl, accountId, name, gatewayToken } = config;
-      if (!clientWsUrl) {
-        log?.error('[LocalIM-Client] 未配置 clientWsUrl，无法启动长连接');
-        return;
-      }
-
-      // 1. 自动拼接 accountId 到 URL 查询参数 (匹配服务端 urllib.parse 解析逻辑)
-      let finalWsUrl = clientWsUrl;
-      if (!finalWsUrl.startsWith('ws://') && !finalWsUrl.startsWith('wss://')) {
-        finalWsUrl = `ws://${finalWsUrl}`;
-      }
-
-      const urlObj = new URL(finalWsUrl);
-      urlObj.searchParams.set('accountId', accountId || 'default');
-      finalWsUrl = urlObj.toString();
-
-      // 2. 准备请求头和子协议
-      const options: any = {
-        handshakeTimeout: 100000,
-        headers: {}
-      };
-
-      // 如果有 token，同时尝试 Header 和 Subprotocol 两种方式（增加兼容性）
-      let protocols: string[] | undefined = undefined;
-      if (gatewayToken) {
-        options.headers['Authorization'] = `Bearer ${gatewayToken}`;
-        protocols = [gatewayToken];
-      }
-
-      log?.info(`[LocalIM-Client] 正在连接 OpenClaw 服务端: ${finalWsUrl}`);
-
-      try {
-        wsClient = new WebSocket(finalWsUrl, options);
-        let isAlive = true;
-
-        wsClient.on('open', () => {
-          log?.info(`[LocalIM-Client] ✅ 成功连接至服务端 [Account: ${accountId}, name: ${name}]`);
-          isAlive = true;
-
-          // 定时发送 Ping 保持服务端 aliveClients 状态
-          pingTimer = setInterval(() => {
-            if (!wsClient || wsClient.readyState !== WebSocket.OPEN) return;
-            if (!isAlive) {
-              log?.warn('[LocalIM-Client] 心跳响应超时，尝试重连...');
-              wsClient.terminate();
-              return;
-            }
-            isAlive = false;
-            wsClient.ping();
-          }, 30000);
-        });
-
-        wsClient.on('pong', () => { isAlive = true; });
-
-        wsClient.on('message', async (msg) => {
-          try {
-            const data = JSON.parse(msg.toString());
-            // 服务端发来的格式: { userId, conversationId, content }
-            const { userId, conversationId, content } = data;
-
-            if (!content) return;
-
-            log?.info(`[LocalIM-Client] 收到指令 [Conv: ${conversationId}]`);
-
-            const sessionContext = buildSessionContext(userId, conversationId);
-            let lastFullContent = '';
-
-            // 3. 这里的流式输出必须携带 conversationId，否则服务端无法对应 Future
-            for await (const chunk of streamFromGateway({
-              userContent: content,
-              sessionContext,
-              peerId: userId,
-              gatewayPort: cfg.gateway?.port,
-              log,
-              gatewayToken: config.gatewayToken,
-              tokenType: config.tokenType || 'Bearer'
-            })) {
-              lastFullContent += chunk;
-              if (wsClient?.readyState === WebSocket.OPEN) {
-                wsClient.send(JSON.stringify({
-                  type: 'stream',
-                  conversationId, // 必须！用于服务端 handle_message
-                  content: lastFullContent
-                }));
-              }
-            }
-
-            // 4. 发送完成信号
-            if (wsClient?.readyState === WebSocket.OPEN) {
-              wsClient.send(JSON.stringify({
-                type: 'done',
-                conversationId, // 必须！用于服务端触发 set_result
-                content: lastFullContent
-              }));
-            }
-          } catch (err: any) {
-            log?.error(`[LocalIM-Client] 业务处理异常: ${err.message}`);
-            if (wsClient?.readyState === WebSocket.OPEN) {
-              wsClient.send(JSON.stringify({ error: err.message }));
-            }
-          }
-        });
-
-        // 5. 增强的错误处理与退避重连
-        wsClient.on('close', (code, reason) => {
-          if (!stopped) {
-            log?.warn(`[LocalIM-Client] 连接断开 (Code: ${code}). 5秒后重连...`);
-            cleanupClient();
-            scheduleReconnect();
-          }
-        });
-
-        wsClient.on('error', (err: any) => {
-          log?.error(`[LocalIM-Client] WebSocket 错误: ${err.message}`);
-          // 如果是协议不支持导致的 400 错误，下次尝试不带 protocols
-          if (err.message?.includes('400')) protocols = undefined;
-        });
-
-      } catch (err: any) {
-        log?.error(`[LocalIM-Client] 初始化连接失败: ${err.message}`);
-        scheduleReconnect();
-      }
-    };
-    connectClient();
-  }
-
-  const rt = getRuntime();
-  if (rt?.channel?.activity?.record) {
-    rt.channel.activity.record('nc-local-im-connector', account.accountId, 'start');
-  } else {
-    log?.debug('[LocalIM] Runtime activity recorder not available, skipping recording.');
-  }
-
-  return Promise.resolve({
-    stop: () => doStop('manual'),
-    isHealthy: () => !stopped,
-  });
-}
+// 导出兼容旧代码的函数
+export { resolveLocalIMAccount, listLocalIMAccountIds, resolveDefaultLocalIMAccountId };
+export type { ResolvedLocalIMAccount };

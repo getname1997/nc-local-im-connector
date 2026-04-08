@@ -21,7 +21,7 @@ describe('Local IM Plugin', () => {
       } as any;
 
       const account = resolveAccount(cfg, '__default__');
-      
+
       expect(account.accountId).toBe('__default__');
       expect(account.config.connectionMode).toBe('server');
       expect(account.config.wsPort).toBe(3001);
@@ -43,7 +43,7 @@ describe('Local IM Plugin', () => {
       } as any;
 
       const account = resolveAccount(cfg, '__default__');
-      
+
       expect(account.accountId).toBe('__default__');
       expect(account.config.connectionMode).toBe('client');
       expect(account.config.clientWsUrl).toBe('ws://127.0.0.1:8080');
@@ -54,7 +54,7 @@ describe('Local IM Plugin', () => {
     it('returns default config when no config exists', () => {
       const cfg: OpenClawConfig = {} as any;
       const account = resolveAccount(cfg, '__default__');
-      
+
       expect(account.accountId).toBe('__default__');
       expect(account.config.enabled).toBe(true);
       expect(account.config.connectionMode).toBe('server');
@@ -92,7 +92,7 @@ describe('Local IM Plugin', () => {
       } as any;
 
       const result = ncLocalImPlugin.setup!.inspectAccount!(cfg, '__default__');
-      
+
       expect(result.enabled).toBe(true);
       expect(result.configured).toBe(true);
       expect(result.tokenStatus).toBe('available');
@@ -111,7 +111,7 @@ describe('Local IM Plugin', () => {
       } as any;
 
       const result = ncLocalImPlugin.setup!.inspectAccount!(cfg, '__default__');
-      
+
       expect(result.enabled).toBe(true);
       expect(result.configured).toBe(true);
       expect(result.connectionMode).toBe('client');
@@ -128,7 +128,7 @@ describe('Local IM Plugin', () => {
       } as any;
 
       const result = ncLocalImPlugin.setup!.inspectAccount!(cfg, '__default__');
-      
+
       expect(result.configured).toBe(false);
     });
 
@@ -143,7 +143,7 @@ describe('Local IM Plugin', () => {
       } as any;
 
       const result = ncLocalImPlugin.setup!.inspectAccount!(cfg, '__default__');
-      
+
       expect(result.configured).toBe(false);
     });
 
@@ -160,7 +160,7 @@ describe('Local IM Plugin', () => {
       } as any;
 
       const result = ncLocalImPlugin.setup!.inspectAccount!(cfg, '__default__');
-      
+
       expect(result.tokenStatus).toBe('missing');
     });
   });
@@ -168,7 +168,7 @@ describe('Local IM Plugin', () => {
   describe('buildSessionContext', () => {
     it('builds session context without conversationId', () => {
       const ctx = buildSessionContext('user123');
-      
+
       expect(ctx.channel).toBe('nc-local-im-connector');
       expect(ctx.accountId).toBe('__default__');
       expect(ctx.chatType).toBe('direct');
@@ -178,7 +178,7 @@ describe('Local IM Plugin', () => {
 
     it('builds session context with conversationId', () => {
       const ctx = buildSessionContext('user123', 'conv456');
-      
+
       expect(ctx.channel).toBe('nc-local-im-connector');
       expect(ctx.accountId).toBe('__default__');
       expect(ctx.chatType).toBe('direct');

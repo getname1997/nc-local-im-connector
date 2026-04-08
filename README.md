@@ -1,271 +1,183 @@
-# Local IM Connector Plugin for OpenClaw
+# nc-local-im-connector
 
-提供本地 WebSocket 和 HTTP 服务，允许外部应用通过标准接口与 OpenClaw 智能体对话。
+本地 IM 连接器插件，支持多账号 Client 长连接模式，用于连接外部 IM 服务。
 
-## 特性
+## 功能特性
 
-- **双模式运行**
-  - **Server 模式**：本地监听 WebSocket (默认 3001) 和 HTTP (默认 3002) 服务
-  - **Client 模式**：主动连接外部 WebSocket 网关，类似钉钉 Stream 模式
+- **多账号支持**：支持配置多个 IM 账号，每个账号独立连接
+- **WebSocket Client 模式**：作为客户端连接到外部 WebSocket 服务
+- **AI 回复流式输出**：支持 AI 回复内容流式推送到外部 IM
+- **消息去重**：5 分钟 TTL 的消息去重缓存，防止重复处理
+- **指数退避重连**：连接断开后自动重连，指数退避策略
 
-- **长连接支持**
-  - WebSocket 心跳保活机制（30秒间隔）
-  - Client 模式自动断线重连（5秒延迟）
-  - SSE 流式输出支持
+## 架构设计
 
-- **流式对话**
-  - 与 OpenClaw Gateway 的流式通信
-  - 实时返回 AI 回复内容
-
-## 快速开始
-
-### 安装依赖
-
-```bash
-pnpm install
 ```
-
-### 编译
-
-```bash
-pnpm build
-```
-
-### 运行测试
-
-```bash
-pnpm test
+nc-local-im-connector/
+├── index.ts                    # 插件入口，注册 channel
+├── src/
+│   ├── channel.ts              # Channel 插件定义
+│   ├── runtime.ts              # PluginRuntime 存储
+│   ├── config/
+│   │   ├── schema.ts           # 配置 Schema 定义
+│   │   └── accounts.ts         # 账号配置解析
+│   ├── core/
+│   │   ├── connection.ts       # WebSocket 连接管理、消息处理
+│   │   └── provider.ts         # 账号启动/停止逻辑
+│   ├── types/
+│   │   └── index.ts            # 类型定义
+│   └── utils/
+│       └── logger.ts           # 日志工具
+└── README.md
 ```
 
 ## 配置说明
 
-### Server 模式配置
+### 基础配置
 
 ```json
 {
   "channels": {
     "nc-local-im-connector": {
       "enabled": true,
-      "connectionMode": "server",
-      "wsPort": 3001,
-      "httpPort": 3002,
-      "gatewayToken": "your-gateway-token",
-      "tokenType": "Bearer"
+      "serverUrl": "ws://192.168.100.168:8080",
+      "defaultAccount": "u00267",
+      "name": "刘XXXX"
     }
   }
 }
 ```
 
-### Client 模式配置
+### 配置项说明
 
+| 配置项 | 类型 | 必填 | 说明 |
+|--------|------|------|------|
+| `serverUrl` | string | 是 | WebSocket 服务端地址 |
+| `defaultAccount` | string | 否 | 默认账号 ID |
+| `accounts` | object | 是 | 账号配置映射 |
+| `accounts.<id>.enabled` | boolean | 否 | 是否启用该账号 |
+| `accounts.<id>.name` | string | 否 | 账号显示名称 |
+
+## 消息协议
+
+### 客户端 → 服务端（发送）
+
+连接时通过 URL 参数传递账号 ID：
+```
+ws://192.168.100.168:8080/?accountId=u00267
+```
+
+### 服务端 → 客户端（接收）
+
+#### 文本消息
 ```json
 {
-  "channels": {
-    "nc-local-im-connector": {
-      "enabled": true,
-      "connectionMode": "client",
-      "clientWsUrl": "ws://127.0.0.1:8080",
-      "gatewayToken": "your-gateway-token",
-      "tokenType": "Bearer"
-    }
-  }
+  "type": "message",
+  "messageId": "uuid-timestamp-random",
+  "conversationId": "会话ID",
+  "userId": "用户ID",
+  "content": "消息内容"
 }
 ```
 
-## API 接口
+### 客户端 → 服务端（推送）
 
-### WebSocket 接口 (Server 模式)
-
-连接地址：`ws://localhost:3001`
-
-发送消息格式：
-```json
-{
-  "userId": "user123",
-  "conversationId": "conv456",
-  "content": "你好"
-}
-```
-
-接收消息格式：
+#### 流式更新
 ```json
 {
   "type": "stream",
-  "conversationId": "conv456",
-  "content": "你好！我是AI助手..."
+  "conversationId": "会话ID",
+  "content": "当前累积的回复内容"
 }
 ```
 
-完成消息格式：
+#### 回复完成
 ```json
 {
   "type": "done",
-  "conversationId": "conv456",
-  "content": "完整回复内容"
+  "conversationId": "会话ID",
+  "content": "完整的回复内容"
 }
 ```
 
-### HTTP REST 接口 (Server 模式)
-
-#### 同步接口 - 等待完成后返回
-
-```bash
-POST http://localhost:3002/chat
-Content-Type: application/json
-
-{
-  "userId": "user123",
-  "conversationId": "conv456",
-  "content": "你好"
-}
-```
-
-响应：
+#### 错误通知
 ```json
 {
-  "reply": "完整回复内容"
+  "type": "error",
+  "conversationId": "会话ID",
+  "error": "错误信息"
 }
 ```
 
-#### SSE 流式接口 - 实时流式输出
+## 会话 Key 格式
+
+AI 回复的会话 Key 格式：
+```
+agent:{agentId}:nc-local-im-connector:{peerKind}:{sessionPeerId}
+```
+
+示例：
+```
+agent:default:nc-local-im-connector:user:u00267
+agent:default:nc-local-im-connector:conversation:f6cf52ac-9f9d-4abd-890e-95e55439b939
+```
+
+## AI 回复流程
+
+```
+1. 收到 WebSocket 消息
+2. 消息去重检查（5 分钟 TTL）
+3. 构建会话上下文（sessionKey）
+4. 调用 createReplyPrefixOptions 生成 prefixOptions
+5. 调用 createReplyDispatcherWithTyping 创建 dispatcher
+6. 调用 withReplyDispatcher + dispatchReplyFromConfig 触发 AI
+7. deliver 回调收到 AI 回复
+8. 通过 WebSocket 推送到外部 IM
+```
+
+## 关键依赖
+
+- `openclaw/plugin-sdk` - OpenClaw 插件 SDK
+- `openclaw/plugin-sdk/channel-runtime` - 提供 `createReplyPrefixOptions`
+- `openclaw/plugin-sdk/reply-runtime` - 提供 `createReplyDispatcherWithTyping`
+
+## 日志标签
+
+日志前缀格式：`[LocalIM][{accountId}]`
+
+示例：
+```
+[LocalIM][u00267] 正在连接服务端: ws://192.168.100.168:8080/?accountId=u00267
+[LocalIM][u00267] ✅ 成功连接至服务端
+[LocalIM][u00267] 🚀 开始处理消息...
+[LocalIM][u00267] AI 开始回复
+[LocalIM][u00267] deliver: kind=final, textLength=506
+[LocalIM][u00267] 回复空闲
+```
+
+## 开发说明
+
+### 构建
 
 ```bash
-POST http://localhost:3002/chat/stream
-Content-Type: application/json
+npm run build
+```
 
+### 调试
+
+启用详细日志：
+```json
 {
-  "userId": "user123",
-  "conversationId": "conv456",
-  "content": "你好"
+  "channels": {
+    "nc-local-im-connector": {
+      "debug": true
+    }
+  }
 }
 ```
 
-响应格式（Server-Sent Events）：
-```
-data: {"type":"stream","conversationId":"conv456","chunk":"你"}
+### 常见问题
 
-data: {"type":"stream","conversationId":"conv456","chunk":"好"}
-
-data: {"type":"done","conversationId":"conv456"}
-```
-
-## 重构说明
-
-本插件已从旧版 SDK 迁移至 **OpenClaw 2026.3.24-beta.2** 最新规范：
-
-### 核心变更
-
-1. **架构升级**
-   - 使用 `createChatChannelPlugin` 标准框架
-   - 适配新的配置 Schema 和 API 接口
-   - 支持独立的 setup-entry 轻量级入口
-
-2. **保留功能**
-   - ✅ Server/Client 双模式运行
-   - ✅ WebSocket 心跳保活
-   - ✅ SSE 流式输出
-   - ✅ 断线自动重连
-   - ✅ Gateway 流式通信
-
-3. **新增特性**
-   - ✅ 标准化的账户解析和检查
-   - ✅ 完整的单元测试覆盖
-   - ✅ 类型安全的 TypeScript 定义
-   - ✅ 公共 API 导出接口
-
-### 文件结构
-
-```
-nc-local-im-connector/
-├── package.json              # 元数据配置
-├── openclaw.plugin.json      # 配置 Schema
-├── tsconfig.json             # TypeScript 配置
-├── index.ts                  # 主入口（defineChannelPluginEntry）
-├── setup-entry.ts            # 轻量级设置入口
-├── api.ts                    # 公共 API 导出
-├── README.md                 # 文档
-└── src/
-    ├── channel.ts            # 核心插件定义
-    └── channel.test.ts       # 单元测试
-```
-
-## 开发指南
-
-### 添加新的出站能力
-
-在 `src/channel.ts` 中扩展 `outbound` 配置：
-
-```typescript
-outbound: {
-  attachedResults: {
-    sendText: async (params) => {
-      // 发送文本逻辑
-      return { messageId: '...' };
-    },
-    sendMedia: async (params) => {
-      // 发送媒体逻辑
-      return { messageId: '...' };
-    },
-  },
-},
-```
-
-### 扩展安全策略
-
-在 `security` 配置中添加自定义策略：
-
-```typescript
-security: {
-  dm: {
-    channelKey: 'nc-local-im-connector',
-    resolvePolicy: (account) => {
-      // 自定义安全策略
-      return 'allowlist';
-    },
-    resolveAllowFrom: (account) => {
-      // 返回允许的用户列表
-      return ['user1', 'user2'];
-    },
-    defaultPolicy: 'allowlist',
-  },
-},
-```
-
-## 故障排查
-
-### Server 模式无法启动
-
-- 检查端口是否被占用：`wsPort` 和 `httpPort`
-- 查看日志输出，确认是否有错误信息
-
-### Client 模式连接失败
-
-- 验证 `clientWsUrl` 配置是否正确
-- 检查外部 WebSocket 服务是否可访问
-- 查看日志，确认是否在自动重连
-
-### Gateway 认证失败
-
-- 确认 `gatewayToken` 配置正确
-- 检查 `tokenType` 设置（Bearer 或 ApiKey）
-- 验证 Gateway 服务是否需要认证
-
-## 版本历史
-
-### v2.0.0 (2026-04-03)
-- 🔄 完全迁移至 OpenClaw 2026.3.24-beta.2 SDK
-- 🏗️ 使用 `createChatChannelPlugin` 标准框架
-- ✨ 添加完整的单元测试
-- 📝 完善类型定义和 API 导出
-- 📚 更新文档和配置说明
-
-### v1.1.0 (Previous)
-- 原始版本，基于旧版 SDK
-
-## 许可证
-
-MIT License
-
-## 贡献
-
-欢迎提交 Issue 和 Pull Request！
+1. **消息被忽略**：检查 `isProcessing` 状态，可能上一条消息未处理完成
+2. **AI 不回复**：检查 `createReplyPrefixOptions` 导入是否正确
+3. **无限循环**：确保 `markDispatchIdle()` 不在 `onIdle` 回调中调用
