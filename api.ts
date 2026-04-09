@@ -39,12 +39,13 @@ export interface ConnectionStatus {
 /**
  * Helper to build session context for external callers
  */
-export function buildSessionContext(userId: string, conversationId?: string) {
+export function buildSessionContext(userId: string, conversationId?: string, sessionId?: string) {
   return {
     channel: 'nc-local-im-connector',
     accountId: '__default__',
     chatType: 'direct' as const,
     peerId: userId,
     conversationId,
+    sessionId,
   };
 }

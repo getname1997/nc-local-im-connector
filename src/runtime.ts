@@ -27,6 +27,6 @@ function createRuntimeStore<T>(errorMessage: string) {
 }
 
 const { setRuntime: setLocalIMRuntime, getRuntime: getLocalIMRuntime } =
-  createRuntimeStore<PluginRuntime>("LocalIM runtime not initialized");
+    createRuntimeStore<PluginRuntime>("LocalIM runtime not initialized");
 
 export { getLocalIMRuntime, setLocalIMRuntime };

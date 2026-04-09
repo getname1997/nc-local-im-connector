@@ -139,6 +139,20 @@ function looksLikeId(raw: string): boolean {
   return typeof raw === 'string' && raw.length > 0 && !raw.includes(' ');
 }
 
+/**
+ * Helper to build session context for external callers
+ */
+export function buildSessionContext(userId: string, conversationId?: string, sessionId?: string) {
+  return {
+    channel: 'nc-local-im-connector',
+    accountId: '__default__',
+    chatType: 'direct' as const,
+    peerId: userId,
+    conversationId,
+    sessionId,
+  };
+}
+
 // ============ 插件定义 ============
 
 export const localIMPlugin: ChannelPlugin<ResolvedLocalIMAccount> = {

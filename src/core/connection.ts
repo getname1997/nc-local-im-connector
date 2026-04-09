@@ -1,13 +1,13 @@
 /**
  * 本地 IM WebSocket 连接管理
- * 
+ *
  * 职责：
  * - 管理 Client 模式下的 WebSocket 长连接
  * - 实现应用层心跳检测（30 秒间隔）
  * - 处理连接重连逻辑，带指数退避
  * - 消息去重（内置 Map，5 分钟 TTL）
  * - 使用 SDK 的 Reply Dispatcher 集成 AI
- * 
+ *
  * 核心特性：
  * - 指数退避重连，避免雪崩效应
  * - 使用框架的 Reply Dispatcher（无需配置 gatewayToken）
@@ -47,7 +47,7 @@ function checkAndMarkMessage(messageId: string): boolean {
     return true; // 重复
   }
   messageDedupCache.set(messageId, now);
-  
+
   // 清理过期条目
   for (const [id, time] of messageDedupCache) {
     if (now - time > MESSAGE_DEDUP_TTL) {
@@ -59,13 +59,14 @@ function checkAndMarkMessage(messageId: string): boolean {
 
 // ============ 会话构建 ============
 
-function buildSessionContext(userId: string, conversationId: string | undefined, accountId: string): SessionContext {
+function buildSessionContext(userId: string, conversationId: string | undefined, accountId: string, sessionId?: string): SessionContext {
   return {
     channel: 'nc-local-im-connector',
     accountId,
     chatType: 'direct',
     peerId: userId,
     conversationId,
+    sessionId,
   };
 }
 
@@ -90,7 +91,7 @@ export type MonitorLocalIMOpts = {
 
 /**
  * 监控单个账号（Client 模式）
- * 
+ *
  * 使用框架的 Reply Dispatcher 处理消息，无需配置 gatewayToken
  */
 export async function monitorSingleAccount(opts: MonitorLocalIMOpts): Promise<void> {
@@ -154,7 +155,7 @@ export async function monitorSingleAccount(opts: MonitorLocalIMOpts): Promise<vo
     if (isStopped) return;
     isStopped = true;
     log.info(`[LocalIM][${accountId}] 停止客户端连接`);
-    
+
     // 停止当前回复
     if (currentDispatcher) {
       try {
@@ -162,7 +163,7 @@ export async function monitorSingleAccount(opts: MonitorLocalIMOpts): Promise<vo
       } catch {}
       currentDispatcher = null;
     }
-    
+
     cleanupClient();
   };
 
@@ -170,6 +171,8 @@ export async function monitorSingleAccount(opts: MonitorLocalIMOpts): Promise<vo
 
   const sendToWebSocket = (type: string, data: any) => {
     if (wsClient?.readyState === WebSocket.OPEN) {
+      // 这里的 data 通常包含 conversationId, content 等
+      // 我们显式透传 sessionId，如果它存在的话
       wsClient.send(JSON.stringify({ type, ...data }));
     }
   };
@@ -209,10 +212,10 @@ export async function monitorSingleAccount(opts: MonitorLocalIMOpts): Promise<vo
 
   const scheduleReconnect = () => {
     if (isStopped || reconnectTimer) return;
-    
+
     const delay = calculateBackoffDelay(reconnectAttempts);
     log.info(`[LocalIM][${accountId}] ⏳ ${Math.round(delay / 1000)} 秒后尝试重连...`);
-    
+
     reconnectTimer = setTimeout(() => {
       reconnectTimer = null;
       doReconnect().catch((err) => {
@@ -240,6 +243,9 @@ export async function monitorSingleAccount(opts: MonitorLocalIMOpts): Promise<vo
     log.info(`MessageId: ${messageId}`);
     log.info(`用户：${data.userId || 'unknown'}`);
     log.info(`会话：${data.conversationId || 'N/A'}`);
+    if (data.sessionId) {
+      log.info(`SessionId: ${data.sessionId}`);
+    }
     log.info(`内容长度：${data.content?.length || 0}`);
 
     // 消息去重（使用 messageId，不是 conversationId）
@@ -250,7 +256,7 @@ export async function monitorSingleAccount(opts: MonitorLocalIMOpts): Promise<vo
     }
 
     try {
-      const { userId, conversationId, content } = data;
+      const { userId, conversationId, content, sessionId } = data;
       if (!content) {
         log.warn(`⚠️ 收到无效消息负载，缺少 content 字段`);
         return;
@@ -266,7 +272,7 @@ export async function monitorSingleAccount(opts: MonitorLocalIMOpts): Promise<vo
       accumulatedText = '';
 
       // 构建会话上下文
-      const sessionContext = buildSessionContext(userId, conversationId, accountId);
+      const sessionContext = buildSessionContext(userId, conversationId, accountId, sessionId);
 
       log.info(`🚀 开始处理消息...`);
 
@@ -294,8 +300,9 @@ export async function monitorSingleAccount(opts: MonitorLocalIMOpts): Promise<vo
           accountId: accountId,
           peer: {
             kind: sessionContext.chatType,
-            id: sessionContext.sessionPeerId || userId || accountId,
+            id: sessionContext.sessionPeerId || sessionContext.sessionId || userId || accountId,
           },
+          externalUserId: userId, // 明确 userId 为外部系统（openclaw 实例）标识
           dmScope: dmScope,
         });
 
@@ -305,7 +312,7 @@ export async function monitorSingleAccount(opts: MonitorLocalIMOpts): Promise<vo
           BodyForAgent: content,
           RawBody: content,
           CommandBody: content,
-          From: userId || accountId,
+          From: sessionContext.sessionId || userId || accountId,
           To: accountId,
           SessionKey: sessionKey,
           AccountId: accountId,
@@ -323,8 +330,11 @@ export async function monitorSingleAccount(opts: MonitorLocalIMOpts): Promise<vo
 
         // 创建 Reply Dispatcher
         let currentAccumulatedText = '';
+        let currentAccumulatedThought = ''; // 累积思考过程
         let replyComplete = false;
+        let finalDoneSent = false; // 标志位：是否已发送最终回复
         let replyError: Error | null = null;
+        let idleLogged = false; // 标志位：是否已经记录过空闲日志
 
         // 导入 channel-runtime 模块（createReplyPrefixOptions）
         const channelRuntime = await import("openclaw/plugin-sdk/channel-runtime") as any;
@@ -339,44 +349,90 @@ export async function monitorSingleAccount(opts: MonitorLocalIMOpts): Promise<vo
         });
 
         const { dispatcher, replyOptions, markDispatchIdle } =
-          core.channel.reply.createReplyDispatcherWithTyping({
-            ...(prefixOptions || {}),
-            humanDelay: core.channel.reply.resolveHumanDelayConfig(cfg, 'main'),
-            onReplyStart: () => {
-              log.info(`[LocalIM][${accountId}] AI 开始回复`);
-            },
-            deliver: async (payload, info) => {
-              let text = payload.text ?? '';
-              log.debug(`[LocalIM][${accountId}] deliver: kind=${info?.kind}, textLength=${text.length}`);
+            core.channel.reply.createReplyDispatcherWithTyping({
+              ...(prefixOptions || {}),
+              humanDelay: core.channel.reply.resolveHumanDelayConfig(cfg, 'main'),
+              onReplyStart: () => {
+                log.info(`[LocalIM][${accountId}] AI 开始回复`);
+              },
+              deliver: async (payload, info) => {
+                let text = payload.text ?? '';
+                let thought = (payload as any).thought ?? ''; // 获取思考过程
 
-              if (info?.kind === "final") {
-                currentAccumulatedText = text;
-                replyComplete = true;
-                // 发送到 WebSocket
-                sendToWebSocket('done', { conversationId, content: currentAccumulatedText });
-                // 回复完成，标记为空闲
+                log.debug(`[LocalIM][${accountId}] deliver: kind=${info?.kind}, textLength=${text.length}, thoughtLength=${thought.length}`);
+
+                // 处理思考过程
+                if (thought) {
+                  let isThoughtGrown = false;
+                  // 思考过程在 SDK 中通常也是累积的，但也可能包含增量
+                  // 为了保险，我们采用同样的增长判断逻辑
+                  if (thought.length > currentAccumulatedThought.length && thought.startsWith(currentAccumulatedThought)) {
+                    currentAccumulatedThought = thought;
+                    isThoughtGrown = true;
+                  } else if (thought.length > 0 && !currentAccumulatedThought.endsWith(thought)) {
+                    currentAccumulatedThought += thought;
+                    isThoughtGrown = true;
+                  }
+
+                  if (isThoughtGrown) {
+                    sendToWebSocket('thought', {
+                      conversationId,
+                      sessionId,
+                      content: currentAccumulatedThought,
+                      delta: thought // 这里的 delta 最好是原始增量
+                    });
+                  }
+                }
+
+                if (info?.kind === "final") {
+                  // final 状态下的 text 通常是全量回复内容
+                  // 采用健壮的赋值逻辑：如果 text 包含当前累积内容且更长，则视为全量更新
+                  // 否则，如果 text 是增量（不包含前缀），则累加
+                  if (text.length >= currentAccumulatedText.length && text.startsWith(currentAccumulatedText)) {
+                    currentAccumulatedText = text;
+                  } else if (text.length > 0 && !currentAccumulatedText.endsWith(text)) {
+                    currentAccumulatedText += text;
+                  }
+
+                  replyComplete = true;
+                  // 注意：不再在这里发送 'done'，统一由 onSettled 处理以确保唯一性
+                  // 但为了兼容性，如果这是最后一个包，我们确保 accumulatedText 最全
+                  accumulatedText = currentAccumulatedText;
+                  // 回复完成，标记为空闲
+                  markDispatchIdle();
+                } else {
+                  // 流式更新
+                  // 同样处理全量 vs 增量逻辑
+                  if (text.length > currentAccumulatedText.length && text.startsWith(currentAccumulatedText)) {
+                    currentAccumulatedText = text;
+                  } else if (text.length > 0 && !currentAccumulatedText.endsWith(text)) {
+                    // 如果 text 不以 currentAccumulatedText 开头，且 currentAccumulatedText 不以 text 结尾（防止重复累加短片段）
+                    currentAccumulatedText += text;
+                  }
+
+                  accumulatedText = currentAccumulatedText;
+                  if (currentAccumulatedText.length > 0) {
+                    sendToWebSocket('stream', { conversationId, sessionId, content: currentAccumulatedText });
+                  }
+                }
+              },
+              onError: async (error, info) => {
+                log.error(`[LocalIM][${accountId}] 回复错误: ${String(error)}`);
+                replyError = error instanceof Error ? error : new Error(String(error));
+                sendToWebSocket('error', { conversationId, sessionId, error: String(error) });
                 markDispatchIdle();
-              } else {
-                // 流式更新
-                currentAccumulatedText += text;
-                accumulatedText = currentAccumulatedText;
-                sendToWebSocket('stream', { conversationId, content: currentAccumulatedText });
-              }
-            },
-            onError: async (error, info) => {
-              log.error(`[LocalIM][${accountId}] 回复错误: ${String(error)}`);
-              replyError = error instanceof Error ? error : new Error(String(error));
-              sendToWebSocket('error', { conversationId, error: String(error) });
-              markDispatchIdle();
-            },
-            onIdle: async () => {
-              // 回复空闲回调，记录日志
-              log.info(`[LocalIM][${accountId}] 回复空闲`);
-            },
-            onCleanup: () => {
-              log.debug(`[LocalIM][${accountId}] 清理`);
-            },
-          });
+              },
+              onIdle: async () => {
+                // 回复空闲回调，确保只记录一次
+                if (!idleLogged) {
+                  log.info(`[LocalIM][${accountId}] 回复空闲`);
+                  idleLogged = true;
+                }
+              },
+              onCleanup: () => {
+                log.debug(`[LocalIM][${accountId}] 清理`);
+              },
+            });
 
         currentDispatcher = dispatcher;
 
@@ -384,6 +440,16 @@ export async function monitorSingleAccount(opts: MonitorLocalIMOpts): Promise<vo
         await core.channel.reply.withReplyDispatcher({
           dispatcher,
           onSettled: () => {
+            // 调度结束时发送唯一的 'done' 消息
+            if (!finalDoneSent && (currentAccumulatedText.length > 0 || currentAccumulatedThought.length > 0)) {
+              sendToWebSocket('done', {
+                conversationId,
+                sessionId,
+                content: currentAccumulatedText,
+                thought: currentAccumulatedThought
+              });
+              finalDoneSent = true;
+            }
             // 调度结束时也标记一次空闲
             markDispatchIdle();
           },
@@ -397,25 +463,19 @@ export async function monitorSingleAccount(opts: MonitorLocalIMOpts): Promise<vo
           },
         });
 
-        log.info(`📥 AI 处理完成`);
+        log.info(`[LocalIM][${accountId}] 📥 AI 处理完成`);
 
-      } catch (err: any) {
-        log.error(`❌ AI 处理失败：${err.message}`);
-        sendToWebSocket('error', { conversationId, error: err.message });
-        throw err; // 重新抛出，由外层 catch 处理
+      } finally {
+        isProcessing = false;
+        currentDispatcher = null;
       }
 
       processedCount++;
-      isProcessing = false;
-      currentDispatcher = null;
-
-      log.info(`✅ 消息处理完成 (${processedCount}/${receivedCount})`);
+      log.info(`[LocalIM][${accountId}] ✅ 消息处理完成 (${processedCount}/${receivedCount})`);
 
     } catch (err: any) {
-      processedCount++;
-      isProcessing = false;
-      log.error(`❌ 处理消息异常 (${processedCount}/${receivedCount}): ${err.message}`);
-      
+      log.error(`[LocalIM][${accountId}] ❌ 处理消息异常: ${err.message}`);
+
       // 通知错误
       if (currentDispatcher) {
         try {
@@ -425,9 +485,7 @@ export async function monitorSingleAccount(opts: MonitorLocalIMOpts): Promise<vo
         currentDispatcher = null;
       }
 
-      if (wsClient?.readyState === WebSocket.OPEN) {
-        wsClient.send(JSON.stringify({ type: 'error', error: err.message }));
-      }
+      sendToWebSocket('error', { conversationId: data.conversationId, error: err.message });
     }
   };
 
@@ -473,7 +531,7 @@ export async function monitorSingleAccount(opts: MonitorLocalIMOpts): Promise<vo
           // 启动心跳
           pingTimer = setInterval(() => {
             if (!wsClient || wsClient.readyState !== WebSocket.OPEN) return;
-            
+
             const elapsed = Date.now() - lastPongTime;
             if (elapsed > TIMEOUT_THRESHOLD) {
               log.warn(`[LocalIM][${accountId}] ⚠️ 心跳超时（${Math.round(elapsed / 1000)}s），触发重连...`);
@@ -506,10 +564,10 @@ export async function monitorSingleAccount(opts: MonitorLocalIMOpts): Promise<vo
 
         wsClient.on('close', (code, reason) => {
           log.warn(`[LocalIM][${accountId}] WebSocket 关闭: code=${code}, reason=${reason || 'unknown'}`);
-          
+
           // 报告断开状态
           onStatusChange?.({ connected: false });
-          
+
           if (!isStopped) {
             cleanupClient();
             scheduleReconnect();
@@ -533,8 +591,8 @@ export async function monitorSingleAccount(opts: MonitorLocalIMOpts): Promise<vo
     const now = Date.now();
     const timeSinceLastMessage = Math.round((now - lastMessageTime) / 1000);
     log.info(
-      `[LocalIM][${accountId}] 统计：收到=${receivedCount}, 处理=${processedCount}, ` +
-      `丢失=${receivedCount - processedCount}, 距上次消息=${timeSinceLastMessage}s`
+        `[LocalIM][${accountId}] 统计：收到=${receivedCount}, 处理=${processedCount}, ` +
+        `丢失=${receivedCount - processedCount}, 距上次消息=${timeSinceLastMessage}s`
     );
   }, 60000); // 每分钟输出一次
 

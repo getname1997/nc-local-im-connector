@@ -1,6 +1,6 @@
 /**
  * 本地 IM Provider 入口
- * 
+ *
  * 职责：
  * - 提供 monitorLocalIMProvider 函数作为本地 IM 的统一入口
  * - 协调单账号和多账号监控场景
@@ -21,7 +21,7 @@ export type MonitorLocalIMOpts = {
 
 /**
  * 监控本地 IM Provider
- * 
+ *
  * 支持单账号或多账号模式：
  * - 如果指定了 accountId，只启动该账号
  * - 否则启动所有已启用且已配置的账号
@@ -67,15 +67,15 @@ export async function monitorLocalIMProvider(opts: MonitorLocalIMOpts = {}): Pro
 
   // 多账号模式
   const accounts = listEnabledLocalIMAccounts(cfg).filter(
-    a => a.config.connectionMode === 'client'
+      a => a.config.connectionMode === 'client'
   );
-  
+
   if (accounts.length === 0) {
     throw new Error("No enabled Local IM accounts configured (Client mode)");
   }
 
   log.info(
-    `Local IM: starting ${accounts.length} account(s): ${accounts.map((a) => a.accountId).join(", ")}`
+      `Local IM: starting ${accounts.length} account(s): ${accounts.map((a) => a.accountId).join(", ")}`
   );
 
   const monitorPromises: Promise<void>[] = [];
@@ -86,14 +86,14 @@ export async function monitorLocalIMProvider(opts: MonitorLocalIMOpts = {}): Pro
     }
 
     monitorPromises.push(
-      monitorSingleAccount({
-        account,
-        cfg,
-        runtime: opts.runtime,
-        abortSignal: opts.abortSignal,
-        onStatusChange: opts.onStatusChange,
-        log,
-      })
+        monitorSingleAccount({
+          account,
+          cfg,
+          runtime: opts.runtime,
+          abortSignal: opts.abortSignal,
+          onStatusChange: opts.onStatusChange,
+          log,
+        })
     );
   }
 

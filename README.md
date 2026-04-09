@@ -76,17 +76,33 @@ ws://192.168.100.168:8080/?accountId=u00267
   "messageId": "uuid-timestamp-random",
   "conversationId": "会话ID",
   "userId": "用户ID",
+  "sessionId": "会话标识 (可选，用于隔离会话)",
   "content": "消息内容"
 }
 ```
 
+- **userId**: 标识 OpenClaw 实例或服务器。
+- **sessionId**: 标识具体的会话/Agent。如果提供，插件将使用它来构建会话 Key。更换 `sessionId` 会导致插件开启一个全新的会话上下文，从而防止单一会话过长或混淆。
+
 ### 客户端 → 服务端（推送）
+
+#### 思考过程 (Thought)
+```json
+{
+  "type": "thought",
+  "conversationId": "会话ID",
+  "sessionId": "会话ID (由服务端返回)",
+  "content": "当前累积的思考内容",
+  "delta": "本次增量的思考内容"
+}
+```
 
 #### 流式更新
 ```json
 {
   "type": "stream",
   "conversationId": "会话ID",
+  "sessionId": "会话ID (由服务端返回)",
   "content": "当前累积的回复内容"
 }
 ```
@@ -96,7 +112,9 @@ ws://192.168.100.168:8080/?accountId=u00267
 {
   "type": "done",
   "conversationId": "会话ID",
-  "content": "完整的回复内容"
+  "sessionId": "会话ID (由服务端返回)",
+  "content": "完整的回复内容",
+  "thought": "完整的思考内容"
 }
 ```
 
@@ -105,6 +123,7 @@ ws://192.168.100.168:8080/?accountId=u00267
 {
   "type": "error",
   "conversationId": "会话ID",
+  "sessionId": "会话ID (由服务端返回)",
   "error": "错误信息"
 }
 ```
@@ -151,8 +170,10 @@ agent:default:nc-local-im-connector:conversation:f6cf52ac-9f9d-4abd-890e-95e5543
 [LocalIM][u00267] ✅ 成功连接至服务端
 [LocalIM][u00267] 🚀 开始处理消息...
 [LocalIM][u00267] AI 开始回复
-[LocalIM][u00267] deliver: kind=final, textLength=506
+[LocalIM][u00267] deliver: kind=final, textLength=506, thoughtLength=0
+[LocalIM][u00267] 📥 AI 处理完成
 [LocalIM][u00267] 回复空闲
+[LocalIM][u00267] ✅ 消息处理完成 (1/1)
 ```
 
 ## 开发说明

@@ -81,6 +81,8 @@ export interface SessionContext {
   peerId: string;
   /** 会话 ID */
   conversationId?: string;
+  /** OpenClaw 会话 ID，用于防止会话超长 */
+  sessionId?: string;
   /** 用于 sessionKey 的会话标识 */
   sessionPeerId?: string;
 }
