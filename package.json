@@ -1,5 +1,5 @@
 {
-  "name": "nc-local-im-connector",
+  "name": "@local-im/nc-local-im-connector",
   "version": "3.1.0",
   "type": "module",
   "description": "Local IM Channel Plugin for OpenClaw - 基于 OpenClaw 最新 SDK 重构",
